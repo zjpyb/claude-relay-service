@@ -155,6 +155,25 @@ function getAntigravityApiUrlCandidates() {
   return [configured, prod, daily].filter(Boolean)
 }
 
+function getAntigravityHeaders(accessToken, baseUrl) {
+  const resolvedBaseUrl = baseUrl || getAntigravityApiUrl()
+  let host = 'daily-cloudcode-pa.sandbox.googleapis.com'
+  try {
+    host = new URL(resolvedBaseUrl).host || host
+  } catch (e) {
+    // ignore
+  }
+
+  return {
+    Host: host,
+    'User-Agent': process.env.ANTIGRAVITY_USER_AGENT || 'antigravity/1.11.3 windows/amd64',
+    Authorization: `Bearer ${accessToken}`,
+    'Content-Type': 'application/json',
+    'Accept-Encoding': 'gzip',
+    requestType: 'agent'
+  }
+}
+
 function generateAntigravityProjectId() {
   return `ag-${uuidv4().replace(/-/g, '').slice(0, 16)}`
 }
