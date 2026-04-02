@@ -51,6 +51,7 @@ class OpenAIResponsesAccountService {
       dailyQuota = 0, // 每日额度限制（美元），0表示不限制
       quotaResetTime = '00:00', // 额度重置时间（HH:mm格式）
       rateLimitDuration = 60, // 限流时间（分钟）
+      maxConcurrentTasks = 0, // 最大并发任务数，0表示不限制
       disableAutoProtection = false, // 是否关闭自动防护（429/401/400/529 不自动禁用）
       providerEndpoint = 'responses' // Provider 端点类型：responses | auto
     } = options
@@ -104,6 +105,7 @@ class OpenAIResponsesAccountService {
       dailyUsage: '0',
       lastResetDate: redis.getDateStringInTimezone(),
       quotaResetTime,
+      maxConcurrentTasks: maxConcurrentTasks.toString(),
       quotaStoppedAt: '',
       disableAutoProtection: disableAutoProtection.toString(), // 关闭自动防护
       providerEndpoint // Provider 端点类型：responses(默认) | auto
@@ -141,6 +143,8 @@ class OpenAIResponsesAccountService {
         accountData.proxy = null
       }
     }
+
+    accountData.maxConcurrentTasks = parseInt(accountData.maxConcurrentTasks || '0', 10) || 0
 
     return accountData
   }
@@ -183,6 +187,10 @@ class OpenAIResponsesAccountService {
           `Invalid providerEndpoint: ${updates.providerEndpoint}. Must be one of: ${validEndpoints.join(', ')}`
         )
       }
+    }
+
+    if (updates.maxConcurrentTasks !== undefined) {
+      updates.maxConcurrentTasks = String(parseInt(updates.maxConcurrentTasks, 10) || 0)
     }
 
     // 自动防护开关
@@ -252,6 +260,7 @@ class OpenAIResponsesAccountService {
 
       // 隐藏敏感信息
       accountData.apiKey = '***'
+      accountData.maxConcurrentTasks = parseInt(accountData.maxConcurrentTasks || '0', 10) || 0
 
       // 解析 JSON 字段
       if (accountData.proxy) {

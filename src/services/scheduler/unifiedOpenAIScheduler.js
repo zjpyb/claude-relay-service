@@ -502,6 +502,17 @@ class UnifiedOpenAIScheduler {
           continue
         }
 
+        const maxConcurrentTasks = Number(account.maxConcurrentTasks || 0)
+        if (maxConcurrentTasks > 0) {
+          const currentConcurrency = await redis.getOpenAIResponsesAccountConcurrency(account.id)
+          if (currentConcurrency >= maxConcurrentTasks) {
+            logger.debug(
+              `⏭️ Skipping OpenAI-Responses account ${account.name} due to concurrency limit: ${currentConcurrency}/${maxConcurrentTasks}`
+            )
+            continue
+          }
+        }
+
         // OpenAI-Responses 账户默认支持所有模型
         // 因为它们是第三方兼容 API，模型支持由第三方决定
 
@@ -570,6 +581,15 @@ class UnifiedOpenAIScheduler {
         if (!isSchedulable(account.schedulable)) {
           logger.info(`🚫 OpenAI-Responses account ${accountId} is not schedulable`)
           return false
+        }
+        if (Number(account.maxConcurrentTasks || 0) > 0) {
+          const currentConcurrency = await redis.getOpenAIResponsesAccountConcurrency(accountId)
+          if (currentConcurrency >= Number(account.maxConcurrentTasks || 0)) {
+            logger.info(
+              `🚫 OpenAI-Responses account ${accountId} reached concurrency limit: ${currentConcurrency}/${account.maxConcurrentTasks}`
+            )
+            return false
+          }
         }
         // ⏰ 检查订阅是否过期
         if (openaiResponsesAccountService.isSubscriptionExpired(account)) {
@@ -909,6 +929,21 @@ class UnifiedOpenAIScheduler {
               `⏭️ Skipping group member ${accountType} account ${account.name} - temporarily unavailable`
             )
             continue
+          }
+
+          if (accountType === 'openai-responses') {
+            const maxConcurrentTasks = Number(account.maxConcurrentTasks || 0)
+            if (maxConcurrentTasks > 0) {
+              const currentConcurrency = await redis.getOpenAIResponsesAccountConcurrency(
+                account.id
+              )
+              if (currentConcurrency >= maxConcurrentTasks) {
+                logger.debug(
+                  `⏭️ Skipping group member ${accountType} account ${account.name} due to concurrency limit: ${currentConcurrency}/${maxConcurrentTasks}`
+                )
+                continue
+              }
+            }
           }
 
           // 检查token是否过期（仅对 OpenAI OAuth 账户检查）

@@ -146,6 +146,18 @@ router.post('/openai-responses-accounts', authenticateAdmin, async (req, res) =>
   try {
     const accountData = req.body
 
+    if (
+      accountData.maxConcurrentTasks !== undefined &&
+      accountData.maxConcurrentTasks !== null &&
+      (!Number.isInteger(Number(accountData.maxConcurrentTasks)) ||
+        Number(accountData.maxConcurrentTasks) < 0)
+    ) {
+      return res.status(400).json({
+        success: false,
+        error: 'maxConcurrentTasks must be a non-negative integer'
+      })
+    }
+
     // 验证分组类型
     if (
       accountData.accountType === 'group' &&
@@ -216,6 +228,20 @@ router.put('/openai-responses-accounts/:id', authenticateAdmin, async (req, res)
         })
       }
       mappedUpdates.priority = priority.toString()
+    }
+
+    if (
+      mappedUpdates.maxConcurrentTasks !== undefined &&
+      mappedUpdates.maxConcurrentTasks !== null
+    ) {
+      const concurrent = Number(mappedUpdates.maxConcurrentTasks)
+      if (!Number.isInteger(concurrent) || concurrent < 0) {
+        return res.status(400).json({
+          success: false,
+          error: 'maxConcurrentTasks must be a non-negative integer'
+        })
+      }
+      mappedUpdates.maxConcurrentTasks = concurrent
     }
 
     // 处理分组变更

@@ -5,8 +5,10 @@ const { filterForOpenAI } = require('../../utils/headerFilter')
 const openaiResponsesAccountService = require('../account/openaiResponsesAccountService')
 const apiKeyService = require('../apiKeyService')
 const unifiedOpenAIScheduler = require('../scheduler/unifiedOpenAIScheduler')
+const redis = require('../../models/redis')
 const config = require('../../../config/config')
 const crypto = require('crypto')
+const { v4: uuidv4 } = require('uuid')
 const LRUCache = require('../../utils/lruCache')
 const upstreamErrorHelper = require('../../utils/upstreamErrorHelper')
 
@@ -63,6 +65,10 @@ class OpenAIResponsesRelayService {
   // 处理请求转发
   async handleRequest(req, res, account, apiKeyData) {
     let abortController = null
+    let concurrencyAcquired = false
+    let leaseRefreshInterval = null
+    let fullAccount = null
+    const requestId = uuidv4()
     // 获取会话哈希（如果有的话）
     const sessionId = req.headers['session_id'] || req.body?.session_id
     const sessionHash = sessionId
@@ -71,9 +77,30 @@ class OpenAIResponsesRelayService {
 
     try {
       // 获取完整的账户信息（包含解密的 API Key）
-      const fullAccount = await openaiResponsesAccountService.getAccount(account.id)
+      fullAccount = await openaiResponsesAccountService.getAccount(account.id)
       if (!fullAccount) {
         throw new Error('Account not found')
+      }
+
+      const releaseConcurrency = async () => {
+        if (!concurrencyAcquired) {
+          return
+        }
+
+        concurrencyAcquired = false
+        if (leaseRefreshInterval) {
+          clearInterval(leaseRefreshInterval)
+          leaseRefreshInterval = null
+        }
+
+        try {
+          await redis.decrOpenAIResponsesAccountConcurrency(account.id, requestId)
+        } catch (error) {
+          logger.error(
+            `Failed to decrement OpenAI-Responses account concurrency for ${account.id}:`,
+            error
+          )
+        }
       }
 
       // 创建 AbortController 用于取消请求
@@ -85,11 +112,84 @@ class OpenAIResponsesRelayService {
         if (abortController && !abortController.signal.aborted) {
           abortController.abort()
         }
+        releaseConcurrency().catch((error) => {
+          logger.error('Failed to cleanup OpenAI-Responses concurrency on disconnect:', error)
+        })
       }
 
       // 监听客户端断开事件
       req.once('close', handleClientDisconnect)
       res.once('close', handleClientDisconnect)
+      req.once('aborted', () => {
+        releaseConcurrency().catch((error) => {
+          logger.error('Failed to cleanup OpenAI-Responses concurrency on abort:', error)
+        })
+      })
+      req.once('error', () => {
+        releaseConcurrency().catch((error) => {
+          logger.error('Failed to cleanup OpenAI-Responses concurrency on request error:', error)
+        })
+      })
+      res.once('finish', () => {
+        releaseConcurrency().catch((error) => {
+          logger.error('Failed to cleanup OpenAI-Responses concurrency on finish:', error)
+        })
+      })
+      res.once('error', () => {
+        releaseConcurrency().catch((error) => {
+          logger.error('Failed to cleanup OpenAI-Responses concurrency on response error:', error)
+        })
+      })
+
+      const maxConcurrentTasks = Number(fullAccount.maxConcurrentTasks || 0)
+      if (maxConcurrentTasks > 0) {
+        const newConcurrency = Number(
+          await redis.incrOpenAIResponsesAccountConcurrency(account.id, requestId, 600)
+        )
+        concurrencyAcquired = true
+
+        if (newConcurrency > maxConcurrentTasks) {
+          await releaseConcurrency()
+
+          logger.warn(
+            `⚠️ OpenAI-Responses account ${account.name} (${account.id}) concurrency limit exceeded: ${newConcurrency}/${maxConcurrentTasks} (request: ${requestId}, rolled back)`
+          )
+
+          return res.status(429).json({
+            error: {
+              message: `Account concurrency limit reached: ${maxConcurrentTasks}`,
+              type: 'account_concurrency_limit',
+              code: 'account_concurrency_limit'
+            },
+            accountId: account.id,
+            maxConcurrentTasks
+          })
+        }
+
+        logger.debug(
+          `🔓 Acquired OpenAI-Responses concurrency slot for account ${account.name} (${account.id}), current: ${newConcurrency}/${maxConcurrentTasks}, request: ${requestId}`
+        )
+
+        if (req.body?.stream) {
+          leaseRefreshInterval = setInterval(
+            async () => {
+              try {
+                await redis.refreshOpenAIResponsesAccountConcurrencyLease(
+                  account.id,
+                  requestId,
+                  600
+                )
+              } catch (error) {
+                logger.error(
+                  `❌ Failed to refresh OpenAI-Responses concurrency lease for ${account.id}:`,
+                  error.message
+                )
+              }
+            },
+            5 * 60 * 1000
+          )
+        }
+      }
 
       // 构建目标 URL（根据 providerEndpoint 配置决定端点路径）
       const providerEndpoint = fullAccount.providerEndpoint || 'responses'
