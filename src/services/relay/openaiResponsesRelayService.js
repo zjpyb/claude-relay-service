@@ -807,6 +807,8 @@ class OpenAIResponsesRelayService {
     let buffer = ''
     let rateLimitDetected = false
     let rateLimitResetsInSeconds = null
+    let rateLimitErrorData = null
+    let rateLimitIsQuotaExhausted = false
     let streamEnded = false
 
     // 解析 SSE 事件以捕获 usage 数据和 model
@@ -851,6 +853,8 @@ class OpenAIResponsesRelayService {
                 eventData.error.type === 'rate_limit_exceeded'
               ) {
                 rateLimitDetected = true
+                rateLimitErrorData = eventData
+                rateLimitIsQuotaExhausted = this._isQuotaExhausted429Error(eventData)
                 if (eventData.error.resets_in_seconds) {
                   rateLimitResetsInSeconds = eventData.error.resets_in_seconds
                   logger.warn(
@@ -963,22 +967,41 @@ class OpenAIResponsesRelayService {
 
       // 如果在流式响应中检测到限流
       if (rateLimitDetected) {
-        // 使用统一调度器处理限流（与非流式响应保持一致）
         const sessionId = req.headers['session_id'] || req.body?.session_id
         const sessionHash = sessionId
           ? crypto.createHash('sha256').update(sessionId).digest('hex')
           : null
 
-        await unifiedOpenAIScheduler.markAccountRateLimited(
-          account.id,
-          'openai-responses',
-          sessionHash,
-          rateLimitResetsInSeconds
-        )
+        if (rateLimitIsQuotaExhausted) {
+          const resolvedCooldown = this._resolve429ResetSeconds(rateLimitErrorData, null)
+          const cooldownSeconds = rateLimitResetsInSeconds || resolvedCooldown.resetsInSeconds
 
-        logger.warn(
-          `🚫 Processing rate limit for OpenAI-Responses account ${account.id} from stream`
-        )
+          await upstreamErrorHelper
+            .markTempUnavailable(account.id, 'openai-responses', 429, cooldownSeconds)
+            .catch(() => {})
+
+          this._probeQuotaExhausted429Recovery(account, req.body?.model).catch((probeError) => {
+            logger.warn(
+              `Failed to probe OpenAI-Responses stream account availability after quota-like 429 for ${account.id}: ${probeError.message}`
+            )
+          })
+
+          logger.warn(
+            `🚫 Processing quota-like 429 for OpenAI-Responses account ${account.id} from stream with temp pause only`
+          )
+        } else {
+          // 使用统一调度器处理普通限流（与非流式响应保持一致）
+          await unifiedOpenAIScheduler.markAccountRateLimited(
+            account.id,
+            'openai-responses',
+            sessionHash,
+            rateLimitResetsInSeconds
+          )
+
+          logger.warn(
+            `🚫 Processing rate limit for OpenAI-Responses account ${account.id} from stream`
+          )
+        }
       }
 
       // 清理监听器
@@ -1368,10 +1391,10 @@ class OpenAIResponsesRelayService {
       const errorText = this._get429ErrorText(errorData)
       const transientLimitPattern = /too many pending requests|达到请求数限制|最多请求/
 
-      // 配额耗尽类 429 通常不会很快恢复，给一个更长的兜底冷却时间。
+      // 配额耗尽类 429 已有立即重试和后台探测，这里只做短暂冷却，避免长期双重阻塞。
       if (this._isQuotaExhausted429Error(errorData)) {
-        resetsInSeconds = 12 * 60 * 60
-        cooldownReason = 'quota_exhausted_fallback'
+        resetsInSeconds = 5 * 60
+        cooldownReason = 'quota_exhausted_probe_fallback'
       } else if (transientLimitPattern.test(errorText)) {
         resetsInSeconds = 5 * 60
         cooldownReason = 'transient_rate_limit_fallback'
@@ -1461,18 +1484,26 @@ class OpenAIResponsesRelayService {
       logger.error('⚠️ Failed to parse rate limit error:', e)
     }
 
-    // 使用统一调度器标记账户为限流状态（与普通OpenAI账号保持一致）
-    await unifiedOpenAIScheduler.markAccountRateLimited(
-      account.id,
-      'openai-responses',
-      sessionHash,
-      resetsInSeconds
-    )
+    const isQuotaExhausted = this._isQuotaExhausted429Error(errorData)
+
+    if (!isQuotaExhausted) {
+      // 使用统一调度器标记普通 429 限流状态（与普通OpenAI账号保持一致）
+      await unifiedOpenAIScheduler.markAccountRateLimited(
+        account.id,
+        'openai-responses',
+        sessionHash,
+        resetsInSeconds
+      )
+    } else {
+      logger.warn(
+        `⏸️ OpenAI-Responses account ${account.id} hit quota-like 429, skip rateLimited status and use temp pause only`
+      )
+    }
 
     logger.warn('OpenAI-Responses account rate limited', {
       accountId: account.id,
       accountName: account.name,
-      isQuotaExhausted: this._isQuotaExhausted429Error(errorData),
+      isQuotaExhausted,
       resetsInSeconds: resetsInSeconds || 'unknown',
       cooldownReason,
       resetInMinutes: resetsInSeconds ? Math.ceil(resetsInSeconds / 60) : 60,
@@ -1483,7 +1514,7 @@ class OpenAIResponsesRelayService {
     return {
       resetsInSeconds,
       errorData,
-      isQuotaExhausted: this._isQuotaExhausted429Error(errorData)
+      isQuotaExhausted
     }
   }
 
