@@ -1060,8 +1060,14 @@
                     </div>
                     <div v-else class="text-xs text-gray-400">暂无统计</div>
                   </div>
-                  <!-- Claude Console: 显示每日额度和并发状态 -->
-                  <div v-else-if="account.platform === 'claude-console'" class="space-y-3">
+                  <!-- Claude Console / OpenAI-Responses: 显示每日额度和并发状态 -->
+                  <div
+                    v-else-if="
+                      account.platform === 'claude-console' ||
+                      account.platform === 'openai-responses'
+                    "
+                    class="space-y-3"
+                  >
                     <div>
                       <template v-if="Number(account.dailyQuota) > 0">
                         <div class="flex items-center justify-between text-xs">

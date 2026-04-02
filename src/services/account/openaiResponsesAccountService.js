@@ -248,19 +248,20 @@ class OpenAIResponsesAccountService {
     const results = await pipeline.exec()
 
     const accounts = []
-    results.forEach(([err, accountData]) => {
+    for (const [err, accountData] of results) {
       if (err || !accountData || !accountData.id) {
-        return
+        continue
       }
 
       // 过滤非活跃账户
       if (!includeInactive && accountData.isActive !== 'true') {
-        return
+        continue
       }
 
       // 隐藏敏感信息
       accountData.apiKey = '***'
       accountData.maxConcurrentTasks = parseInt(accountData.maxConcurrentTasks || '0', 10) || 0
+      accountData.activeTaskCount = await redis.getOpenAIResponsesAccountConcurrency(accountData.id)
 
       // 解析 JSON 字段
       if (accountData.proxy) {
@@ -292,7 +293,7 @@ class OpenAIResponsesAccountService {
       accountData.platform = accountData.platform || 'openai-responses'
 
       accounts.push(accountData)
-    })
+    }
 
     return accounts
   }
