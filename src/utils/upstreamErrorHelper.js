@@ -350,8 +350,11 @@ const markTempUnavailable = async (
       `⏱️ [UpstreamError] Account ${accountId} (${accountType}) marked temporarily unavailable for ${ttlSeconds}s (${statusCode} ${errorType}), recovers at ${expiresAtIso}`
     )
 
-    // 异步记录错误历史，不阻塞主流程
-    recordErrorHistory(accountId, accountType, statusCode, errorType, context).catch(() => {})
+    const skipHistory = context?.skipHistory === true
+    if (!skipHistory) {
+      // 异步记录错误历史，不阻塞主流程
+      recordErrorHistory(accountId, accountType, statusCode, errorType, context).catch(() => {})
+    }
 
     return { success: true, ttlSeconds, errorType, expiresAt: expiresAtIso }
   } catch (error) {

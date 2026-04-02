@@ -286,13 +286,32 @@ class OpenAIResponsesRelayService {
 
         const oaiAutoProtectionDisabled =
           account?.disableAutoProtection === true || account?.disableAutoProtection === 'true'
+        const historyContext = {
+          model: req.body?.model,
+          path: req.originalUrl,
+          errorBody: errorData
+        }
+
+        if (isQuotaExhausted) {
+          await upstreamErrorHelper
+            .recordErrorHistory(
+              account.id,
+              'openai-responses',
+              429,
+              'quota_exceeded',
+              historyContext
+            )
+            .catch(() => {})
+        }
+
         if (!oaiAutoProtectionDisabled) {
           await upstreamErrorHelper
             .markTempUnavailable(
               account.id,
               'openai-responses',
               429,
-              resetsInSeconds || upstreamErrorHelper.parseRetryAfter(response.headers)
+              resetsInSeconds || upstreamErrorHelper.parseRetryAfter(response.headers),
+              isQuotaExhausted ? { ...historyContext, skipHistory: true } : historyContext
             )
             .catch(() => {})
 
@@ -402,6 +421,20 @@ class OpenAIResponsesRelayService {
           try {
             const oaiAutoProtectionDisabled =
               account?.disableAutoProtection === true || account?.disableAutoProtection === 'true'
+            await upstreamErrorHelper
+              .recordErrorHistory(
+                account.id,
+                'openai-responses',
+                response.status,
+                'quota_exceeded',
+                {
+                  model: req.body?.model,
+                  path: req.originalUrl,
+                  errorBody: errorData,
+                  resetAt
+                }
+              )
+              .catch(() => {})
             if (!oaiAutoProtectionDisabled) {
               await openaiResponsesAccountService.updateAccount(account.id, {
                 status: 'quota_exceeded',
@@ -412,7 +445,9 @@ class OpenAIResponsesRelayService {
                 rateLimitResetAt: '',
                 errorMessage: `Payment Required: 已达到每日费用限制，重置时间 ${resetAt}`
               })
-              await upstreamErrorHelper.clearTempUnavailable(account.id, 'openai-responses').catch(() => {})
+              await upstreamErrorHelper
+                .clearTempUnavailable(account.id, 'openai-responses')
+                .catch(() => {})
             }
             if (sessionHash) {
               await unifiedOpenAIScheduler._deleteSessionMapping(sessionHash).catch(() => {})
@@ -438,6 +473,21 @@ class OpenAIResponsesRelayService {
           try {
             const oaiAutoProtectionDisabled =
               account?.disableAutoProtection === true || account?.disableAutoProtection === 'true'
+            const historyContext = {
+              model: req.body?.model,
+              path: req.originalUrl,
+              errorBody: errorData,
+              pauseStatus: 429
+            }
+            await upstreamErrorHelper
+              .recordErrorHistory(
+                account.id,
+                'openai-responses',
+                response.status,
+                'unroutable_model',
+                historyContext
+              )
+              .catch(() => {})
             if (!oaiAutoProtectionDisabled) {
               await unifiedOpenAIScheduler.markAccountRateLimited(
                 account.id,
@@ -445,7 +495,10 @@ class OpenAIResponsesRelayService {
                 sessionHash
               )
               await upstreamErrorHelper
-                .markTempUnavailable(account.id, 'openai-responses', 429)
+                .markTempUnavailable(account.id, 'openai-responses', 429, null, {
+                  ...historyContext,
+                  skipHistory: true
+                })
                 .catch(() => {})
             }
             if (sessionHash) {
@@ -694,6 +747,14 @@ class OpenAIResponsesRelayService {
           try {
             const oaiAutoProtectionDisabled =
               account?.disableAutoProtection === true || account?.disableAutoProtection === 'true'
+            await upstreamErrorHelper
+              .recordErrorHistory(account.id, 'openai-responses', status, 'quota_exceeded', {
+                model: req.body?.model,
+                path: req.originalUrl,
+                errorBody: errorData,
+                resetAt
+              })
+              .catch(() => {})
             if (!oaiAutoProtectionDisabled) {
               await openaiResponsesAccountService.updateAccount(account.id, {
                 status: 'quota_exceeded',
@@ -704,7 +765,9 @@ class OpenAIResponsesRelayService {
                 rateLimitResetAt: '',
                 errorMessage: `Payment Required: 已达到每日费用限制，重置时间 ${resetAt}`
               })
-              await upstreamErrorHelper.clearTempUnavailable(account.id, 'openai-responses').catch(() => {})
+              await upstreamErrorHelper
+                .clearTempUnavailable(account.id, 'openai-responses')
+                .catch(() => {})
             }
             if (sessionHash) {
               await unifiedOpenAIScheduler._deleteSessionMapping(sessionHash).catch(() => {})
@@ -727,6 +790,21 @@ class OpenAIResponsesRelayService {
           try {
             const oaiAutoProtectionDisabled =
               account?.disableAutoProtection === true || account?.disableAutoProtection === 'true'
+            const historyContext = {
+              model: req.body?.model,
+              path: req.originalUrl,
+              errorBody: errorData,
+              pauseStatus: 429
+            }
+            await upstreamErrorHelper
+              .recordErrorHistory(
+                account.id,
+                'openai-responses',
+                status,
+                'unroutable_model',
+                historyContext
+              )
+              .catch(() => {})
             if (!oaiAutoProtectionDisabled) {
               await unifiedOpenAIScheduler.markAccountRateLimited(
                 account.id,
@@ -734,7 +812,10 @@ class OpenAIResponsesRelayService {
                 sessionHash
               )
               await upstreamErrorHelper
-                .markTempUnavailable(account.id, 'openai-responses', 429)
+                .markTempUnavailable(account.id, 'openai-responses', 429, null, {
+                  ...historyContext,
+                  skipHistory: true
+                })
                 .catch(() => {})
             }
             if (sessionHash) {
@@ -975,9 +1056,27 @@ class OpenAIResponsesRelayService {
         if (rateLimitIsQuotaExhausted) {
           const resolvedCooldown = this._resolve429ResetSeconds(rateLimitErrorData, null)
           const cooldownSeconds = rateLimitResetsInSeconds || resolvedCooldown.resetsInSeconds
+          const historyContext = {
+            model: req.body?.model,
+            path: req.originalUrl,
+            errorBody: rateLimitErrorData
+          }
 
           await upstreamErrorHelper
-            .markTempUnavailable(account.id, 'openai-responses', 429, cooldownSeconds)
+            .recordErrorHistory(
+              account.id,
+              'openai-responses',
+              429,
+              'quota_exceeded',
+              historyContext
+            )
+            .catch(() => {})
+
+          await upstreamErrorHelper
+            .markTempUnavailable(account.id, 'openai-responses', 429, cooldownSeconds, {
+              ...historyContext,
+              skipHistory: true
+            })
             .catch(() => {})
 
           this._probeQuotaExhausted429Recovery(account, req.body?.model).catch((probeError) => {
@@ -1264,9 +1363,7 @@ class OpenAIResponsesRelayService {
     }
 
     if (result.accountId === currentAccount.id) {
-      logger.info(
-        `🧪 配额耗尽类429后调度仍返回原账户 ${currentAccount.id}，跳过本次立即重试`
-      )
+      logger.info(`🧪 配额耗尽类429后调度仍返回原账户 ${currentAccount.id}，跳过本次立即重试`)
       return null
     }
 
@@ -1342,7 +1439,9 @@ class OpenAIResponsesRelayService {
           rateLimitResetAt: '',
           rateLimitDuration: ''
         })
-        await upstreamErrorHelper.clearTempUnavailable(account.id, 'openai-responses').catch(() => {})
+        await upstreamErrorHelper
+          .clearTempUnavailable(account.id, 'openai-responses')
+          .catch(() => {})
 
         logger.warn(
           `✅ OpenAI-Responses账户 ${account.id} 在配额耗尽类429后探测可用，已自动恢复调度状态`
