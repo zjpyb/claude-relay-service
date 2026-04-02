@@ -11,6 +11,7 @@ const crypto = require('crypto')
 const { v4: uuidv4 } = require('uuid')
 const LRUCache = require('../../utils/lruCache')
 const upstreamErrorHelper = require('../../utils/upstreamErrorHelper')
+const { createOpenAITestPayload, extractErrorMessage } = require('../../utils/testPayloadHelper')
 
 // lastUsedAt 更新节流（每账户 60 秒内最多更新一次，使用 LRU 防止内存泄漏）
 const lastUsedAtThrottle = new LRUCache(1000) // 最多缓存 1000 个账户
@@ -276,7 +277,7 @@ class OpenAIResponsesRelayService {
 
       // 处理 429 限流错误
       if (response.status === 429) {
-        const { resetsInSeconds, errorData } = await this._handle429Error(
+        const { resetsInSeconds, errorData, isQuotaExhausted } = await this._handle429Error(
           account,
           response,
           req.body?.stream,
@@ -294,6 +295,39 @@ class OpenAIResponsesRelayService {
               resetsInSeconds || upstreamErrorHelper.parseRetryAfter(response.headers)
             )
             .catch(() => {})
+
+          if (isQuotaExhausted) {
+            this._probeQuotaExhausted429Recovery(fullAccount, req.body?.model).catch(
+              (probeError) => {
+                logger.warn(
+                  `Failed to probe OpenAI-Responses account availability after quota-like 429 for ${account.id}: ${probeError.message}`
+                )
+              }
+            )
+          }
+        }
+
+        const quotaRetryCount = Number(req._openaiResponsesQuotaRetryCount || 0)
+        if (isQuotaExhausted && !oaiAutoProtectionDisabled && quotaRetryCount < 1) {
+          try {
+            req._openaiResponsesQuotaRetryCount = quotaRetryCount + 1
+            const retried = await this._retryQuotaExhausted429Request(
+              req,
+              res,
+              account,
+              apiKeyData,
+              sessionHash,
+              handleClientDisconnect,
+              releaseConcurrency
+            )
+            if (retried) {
+              return retried
+            }
+          } catch (retryError) {
+            logger.warn(
+              `Failed to retry OpenAI-Responses request after quota-like 429 for ${account.id}: ${retryError.message}`
+            )
+          }
         }
 
         // 返回错误响应（使用处理后的数据，避免循环引用）
@@ -1182,6 +1216,154 @@ class OpenAIResponsesRelayService {
     }
   }
 
+  _isQuotaExhausted429Error(errorData) {
+    const errorText = this._get429ErrorText(errorData)
+    return /daily_limit_exceeded|usage_limit_exceeded|daily usage limit exceeded|the usage limit has been reached|当前订阅余额已用尽|余额已用尽|subscription.*余额|subscription balance|insufficient.*quota|额度不足|剩余额度/.test(
+      errorText
+    )
+  }
+
+  _buildProbeTargetUrl(account) {
+    const baseUrl = account?.baseApi || ''
+    const providerEndpoint = account?.providerEndpoint || 'responses'
+    let endpointPath = '/responses'
+
+    if (providerEndpoint === 'auto') {
+      endpointPath = '/responses'
+    }
+
+    if (!baseUrl.endsWith('/v1')) {
+      endpointPath = `/v1${endpointPath}`
+    }
+
+    return `${baseUrl}${endpointPath}`
+  }
+
+  async _retryQuotaExhausted429Request(
+    req,
+    res,
+    currentAccount,
+    apiKeyData,
+    sessionHash,
+    handleClientDisconnect,
+    releaseConcurrency
+  ) {
+    const requestedModel = req.body?.model || null
+    const result = await unifiedOpenAIScheduler.selectAccountForApiKey(
+      apiKeyData,
+      sessionHash,
+      requestedModel
+    )
+
+    if (!result?.accountId || result.accountType !== 'openai-responses') {
+      logger.info(
+        `🧪 配额耗尽类429后未找到可立即重试的 OpenAI-Responses 账户，保留原始429响应 for account ${currentAccount.id}`
+      )
+      return null
+    }
+
+    if (result.accountId === currentAccount.id) {
+      logger.info(
+        `🧪 配额耗尽类429后调度仍返回原账户 ${currentAccount.id}，跳过本次立即重试`
+      )
+      return null
+    }
+
+    const retryAccount = await openaiResponsesAccountService.getAccount(result.accountId)
+    if (!retryAccount?.apiKey) {
+      logger.warn(
+        `🧪 配额耗尽类429后选中的重试账户 ${result.accountId} 缺少可用 apiKey，跳过立即重试`
+      )
+      return null
+    }
+
+    logger.warn(
+      `🔁 OpenAI-Responses账户 ${currentAccount.id} 命中配额耗尽类429，已临时暂停并立即重试到账户 ${retryAccount.id}`
+    )
+
+    req.removeListener('close', handleClientDisconnect)
+    res.removeListener('close', handleClientDisconnect)
+    await releaseConcurrency().catch(() => {})
+
+    return this.handleRequest(req, res, retryAccount, apiKeyData)
+  }
+
+  async _probeQuotaExhausted429Recovery(account, requestedModel) {
+    if (!account?.id || !account?.apiKey || !account?.baseApi) {
+      return false
+    }
+
+    if (!requestedModel || typeof requestedModel !== 'string') {
+      logger.info(
+        `🧪 OpenAI-Responses账户 ${account.id} 配额耗尽类429后缺少原始请求模型，跳过后台可用性探测`
+      )
+      return false
+    }
+
+    const apiUrl = this._buildProbeTargetUrl(account)
+    const model = requestedModel
+    const payload = createOpenAITestPayload(model, {
+      prompt: 'ping',
+      maxTokens: 16,
+      stream: true
+    })
+
+    const requestConfig = {
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${account.apiKey}`
+      },
+      timeout: 15000,
+      responseType: 'stream',
+      validateStatus: () => true
+    }
+
+    if (account.proxy) {
+      const proxyAgent = ProxyHelper.createProxyAgent(account.proxy)
+      if (proxyAgent) {
+        requestConfig.httpsAgent = proxyAgent
+        requestConfig.httpAgent = proxyAgent
+      }
+    }
+
+    let response = null
+    try {
+      response = await axios.post(apiUrl, payload, requestConfig)
+      response.data?.destroy?.()
+
+      if (response.status >= 200 && response.status < 400) {
+        await openaiResponsesAccountService.updateAccount(account.id, {
+          status: account.apiKey ? 'active' : 'created',
+          schedulable: 'true',
+          errorMessage: '',
+          rateLimitedAt: '',
+          rateLimitStatus: '',
+          rateLimitResetAt: '',
+          rateLimitDuration: ''
+        })
+        await upstreamErrorHelper.clearTempUnavailable(account.id, 'openai-responses').catch(() => {})
+
+        logger.warn(
+          `✅ OpenAI-Responses账户 ${account.id} 在配额耗尽类429后探测可用，已自动恢复调度状态`
+        )
+        return true
+      }
+
+      logger.info(
+        `🧪 OpenAI-Responses账户 ${account.id} 配额耗尽类429后探测仍不可用: status=${response.status}`
+      )
+      return false
+    } catch (error) {
+      const message = extractErrorMessage(error.response?.data, error.message)
+      logger.info(
+        `🧪 OpenAI-Responses账户 ${account.id} 配额耗尽类429后探测失败，保留暂停状态: ${message}`
+      )
+      return false
+    } finally {
+      response?.data?.destroy?.()
+    }
+  }
+
   _resolve429ResetSeconds(errorData, headers) {
     let resetsInSeconds = null
     let cooldownReason = 'default'
@@ -1206,12 +1388,10 @@ class OpenAIResponsesRelayService {
 
     if (!Number.isFinite(resetsInSeconds) || resetsInSeconds <= 0) {
       const errorText = this._get429ErrorText(errorData)
-      const quotaExhaustedPattern =
-        /daily_limit_exceeded|usage_limit_exceeded|daily usage limit exceeded|the usage limit has been reached|当前订阅余额已用尽|余额已用尽|subscription.*余额|subscription balance|insufficient.*quota|额度不足|剩余额度/
       const transientLimitPattern = /too many pending requests|达到请求数限制|最多请求/
 
       // 配额耗尽类 429 通常不会很快恢复，给一个更长的兜底冷却时间。
-      if (quotaExhaustedPattern.test(errorText)) {
+      if (this._isQuotaExhausted429Error(errorData)) {
         resetsInSeconds = 12 * 60 * 60
         cooldownReason = 'quota_exhausted_fallback'
       } else if (transientLimitPattern.test(errorText)) {
@@ -1314,6 +1494,7 @@ class OpenAIResponsesRelayService {
     logger.warn('OpenAI-Responses account rate limited', {
       accountId: account.id,
       accountName: account.name,
+      isQuotaExhausted: this._isQuotaExhausted429Error(errorData),
       resetsInSeconds: resetsInSeconds || 'unknown',
       cooldownReason,
       resetInMinutes: resetsInSeconds ? Math.ceil(resetsInSeconds / 60) : 60,
@@ -1321,7 +1502,11 @@ class OpenAIResponsesRelayService {
     })
 
     // 返回处理后的数据，避免循环引用
-    return { resetsInSeconds, errorData }
+    return {
+      resetsInSeconds,
+      errorData,
+      isQuotaExhausted: this._isQuotaExhausted429Error(errorData)
+    }
   }
 
   // 过滤请求头 - 已迁移到 headerFilter 工具类
