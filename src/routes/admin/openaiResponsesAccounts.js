@@ -7,6 +7,7 @@ const express = require('express')
 const axios = require('axios')
 const openaiResponsesAccountService = require('../../services/account/openaiResponsesAccountService')
 const accountTestSchedulerService = require('../../services/accountTestSchedulerService')
+const openaiResponsesRelayService = require('../../services/relay/openaiResponsesRelayService')
 const apiKeyService = require('../../services/apiKeyService')
 const accountGroupService = require('../../services/accountGroupService')
 const redis = require('../../models/redis')
@@ -648,10 +649,11 @@ router.post('/openai-responses-accounts/:accountId/test', authenticateAdmin, asy
   const { accountId } = req.params
   const { model = 'gpt-4o-mini' } = req.body
   const startTime = Date.now()
+  let account = null
 
   try {
     // 获取账户信息（apiKey 已自动解密）
-    const account = await openaiResponsesAccountService.getAccount(accountId)
+    account = await openaiResponsesAccountService.getAccount(accountId)
     if (!account) {
       return res.status(404).json({ error: 'Account not found' })
     }
@@ -726,6 +728,19 @@ router.post('/openai-responses-accounts/:accountId/test', authenticateAdmin, asy
   } catch (error) {
     const latency = Date.now() - startTime
     logger.error(`❌ OpenAI-Responses account test failed: ${accountId}`, error.message)
+
+    await openaiResponsesRelayService
+      .applyTestFailureProtection(account, error.response?.status, error.response?.data, {
+        model,
+        path: req.originalUrl,
+        headers: error.response?.headers
+      })
+      .catch((protectionError) => {
+        logger.warn(
+          `Failed to apply OpenAI-Responses auto protection after admin test failure for ${accountId}:`,
+          protectionError
+        )
+      })
 
     return res.status(500).json({
       success: false,

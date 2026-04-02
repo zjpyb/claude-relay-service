@@ -1532,6 +1532,140 @@ class OpenAIResponsesRelayService {
     }
   }
 
+  async applyTestFailureProtection(account, status, errorData, options = {}) {
+    if (!account?.id || !status) {
+      return
+    }
+
+    const { model = null, path = null, headers = null } = options
+    const oaiAutoProtectionDisabled =
+      account?.disableAutoProtection === true || account?.disableAutoProtection === 'true'
+    const historyContext = {
+      model,
+      path,
+      errorBody: errorData
+    }
+
+    const isDailyQuotaExceeded = this._isDailyQuotaExceededError(status, errorData)
+    if (isDailyQuotaExceeded) {
+      const { resetAt } = this._computeNextDailyQuotaResetAt(account.quotaResetTime || '00:00')
+      logger.warn(
+        `💸 OpenAI Responses测试触发明确日额度耗尽，按配置重置时间暂停调度 for account ${account.id}, resetAt=${resetAt}`
+      )
+
+      await upstreamErrorHelper
+        .recordErrorHistory(account.id, 'openai-responses', status, 'quota_exceeded', {
+          ...historyContext,
+          resetAt
+        })
+        .catch(() => {})
+
+      if (!oaiAutoProtectionDisabled) {
+        await openaiResponsesAccountService.updateAccount(account.id, {
+          status: 'quota_exceeded',
+          schedulable: 'false',
+          quotaStoppedAt: new Date().toISOString(),
+          rateLimitedAt: '',
+          rateLimitStatus: '',
+          rateLimitResetAt: '',
+          errorMessage: `Payment Required: 已达到每日费用限制，重置时间 ${resetAt}`
+        })
+        await upstreamErrorHelper.clearTempUnavailable(account.id, 'openai-responses').catch(() => {})
+      }
+      return
+    }
+
+    const isUpstreamSchedulerRateLimit = this._isUpstreamSchedulerRateLimit(status, errorData)
+    if (isUpstreamSchedulerRateLimit) {
+      logger.warn(`🚫 OpenAI Responses测试触发模型不可路由，已按限流处理 for account ${account.id}`)
+
+      await upstreamErrorHelper
+        .recordErrorHistory(account.id, 'openai-responses', status, 'unroutable_model', {
+          ...historyContext,
+          pauseStatus: 429
+        })
+        .catch(() => {})
+
+      if (!oaiAutoProtectionDisabled) {
+        await unifiedOpenAIScheduler.markAccountRateLimited(account.id, 'openai-responses')
+        await upstreamErrorHelper
+          .markTempUnavailable(account.id, 'openai-responses', 429, null, {
+            ...historyContext,
+            pauseStatus: 429,
+            skipHistory: true
+          })
+          .catch(() => {})
+      }
+      return
+    }
+
+    if (status === 429) {
+      const responseLike = {
+        status,
+        data: errorData,
+        headers: headers || {}
+      }
+      const {
+        resetsInSeconds,
+        errorData: normalizedErrorData,
+        isQuotaExhausted
+      } = await this._handle429Error(account, responseLike, false, null)
+
+      const finalErrorData = normalizedErrorData || errorData
+      const quotaHistoryContext = {
+        model,
+        path,
+        errorBody: finalErrorData
+      }
+
+      if (isQuotaExhausted) {
+        await upstreamErrorHelper
+          .recordErrorHistory(account.id, 'openai-responses', 429, 'quota_exceeded', quotaHistoryContext)
+          .catch(() => {})
+      }
+
+      if (!oaiAutoProtectionDisabled) {
+        await upstreamErrorHelper
+          .markTempUnavailable(
+            account.id,
+            'openai-responses',
+            429,
+            resetsInSeconds || upstreamErrorHelper.parseRetryAfter(headers),
+            isQuotaExhausted
+              ? { ...quotaHistoryContext, skipHistory: true }
+              : quotaHistoryContext
+          )
+          .catch(() => {})
+
+        if (isQuotaExhausted) {
+          this._probeQuotaExhausted429Recovery(account, model).catch((probeError) => {
+            logger.warn(
+              `Failed to probe OpenAI-Responses account availability after test 429 for ${account.id}: ${probeError.message}`
+            )
+          })
+        }
+      }
+      return
+    }
+
+    if (status === 401 && !oaiAutoProtectionDisabled) {
+      logger.warn(`🚫 OpenAI Responses测试触发401临时暂停 for account ${account.id}`)
+      await upstreamErrorHelper.markTempUnavailable(account.id, 'openai-responses', 401).catch(() => {})
+      return
+    }
+
+    if (status === 403 && !oaiAutoProtectionDisabled) {
+      logger.warn(`🚫 OpenAI Responses测试触发403临时暂停 for account ${account.id}`)
+      await upstreamErrorHelper.markTempUnavailable(account.id, 'openai-responses', 403).catch(() => {})
+      return
+    }
+
+    if (status >= 500 && !oaiAutoProtectionDisabled) {
+      logger.warn(`🚫 OpenAI Responses测试触发${status}临时暂停 for account ${account.id}`)
+      await upstreamErrorHelper.markTempUnavailable(account.id, 'openai-responses', status).catch(() => {})
+    }
+  }
+
   async _retryQuotaExhausted429Request(
     req,
     res,
@@ -1629,8 +1763,7 @@ class OpenAIResponsesRelayService {
           errorMessage: '',
           rateLimitedAt: '',
           rateLimitStatus: '',
-          rateLimitResetAt: '',
-          rateLimitDuration: ''
+          rateLimitResetAt: ''
         })
         await upstreamErrorHelper
           .clearTempUnavailable(account.id, 'openai-responses')
