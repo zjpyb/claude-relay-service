@@ -232,7 +232,8 @@ const testHistory = ref([])
 
 const platformConfigMap = {
   claude: {
-    endpointBuilder: (accountId) => `${APP_CONFIG.apiPrefix}/admin/claude-accounts/${accountId}/test-config`,
+    endpointBuilder: (accountId) =>
+      `${APP_CONFIG.apiPrefix}/admin/claude-accounts/${accountId}/test-config`,
     defaultModel: 'claude-sonnet-4-5-20250929'
   },
   'openai-responses': {
