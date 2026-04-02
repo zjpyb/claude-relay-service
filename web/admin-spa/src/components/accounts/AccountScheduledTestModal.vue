@@ -230,6 +230,18 @@ const config = ref({
 })
 const testHistory = ref([])
 
+const platformConfigMap = {
+  claude: {
+    endpointBuilder: (accountId) => `${APP_CONFIG.apiPrefix}/admin/claude-accounts/${accountId}/test-config`,
+    defaultModel: 'claude-sonnet-4-5-20250929'
+  },
+  'openai-responses': {
+    endpointBuilder: (accountId) =>
+      `${APP_CONFIG.apiPrefix}/admin/openai-responses-accounts/${accountId}/test-config`,
+    defaultModel: 'gpt-5.4'
+  }
+}
+
 // Cron 预设选项
 const cronPresets = [
   { label: '每天 8:00', value: '0 8 * * *' },
@@ -265,6 +277,20 @@ function formatTimestamp(timestamp) {
   })
 }
 
+function getPlatformConfig(account) {
+  if (!account?.platform) return null
+  return platformConfigMap[account.platform] || null
+}
+
+function createDefaultConfig(account) {
+  const platformConfig = getPlatformConfig(account)
+  return {
+    enabled: false,
+    cronExpression: '0 8 * * *',
+    model: platformConfig?.defaultModel || 'claude-sonnet-4-5-20250929'
+  }
+}
+
 // 加载配置
 async function loadConfig() {
   if (!props.account) return
@@ -272,17 +298,12 @@ async function loadConfig() {
   loading.value = true
   try {
     const authToken = localStorage.getItem('authToken')
-    const platform = props.account.platform
-
-    // 根据平台获取配置端点
-    let endpoint = ''
-    if (platform === 'claude') {
-      endpoint = `${APP_CONFIG.apiPrefix}/admin/claude-accounts/${props.account.id}/test-config`
-    } else {
-      // 其他平台暂不支持
+    const platformConfig = getPlatformConfig(props.account)
+    if (!platformConfig) {
       loading.value = false
       return
     }
+    const endpoint = platformConfig.endpointBuilder(props.account.id)
 
     // 获取配置
     const configRes = await fetch(endpoint, {
@@ -297,7 +318,7 @@ async function loadConfig() {
         config.value = {
           enabled: data.data.config.enabled || false,
           cronExpression: data.data.config.cronExpression || '0 8 * * *',
-          model: data.data.config.model || 'claude-sonnet-4-5-20250929'
+          model: data.data.config.model || platformConfig.defaultModel
         }
       }
     }
@@ -330,15 +351,12 @@ async function saveConfig() {
   saving.value = true
   try {
     const authToken = localStorage.getItem('authToken')
-    const platform = props.account.platform
-
-    let endpoint = ''
-    if (platform === 'claude') {
-      endpoint = `${APP_CONFIG.apiPrefix}/admin/claude-accounts/${props.account.id}/test-config`
-    } else {
+    const platformConfig = getPlatformConfig(props.account)
+    if (!platformConfig) {
       saving.value = false
       return
     }
+    const endpoint = platformConfig.endpointBuilder(props.account.id)
 
     const res = await fetch(endpoint, {
       method: 'PUT',
@@ -379,11 +397,7 @@ watch(
   () => props.show,
   (newVal) => {
     if (newVal) {
-      config.value = {
-        enabled: false,
-        cronExpression: '0 8 * * *',
-        model: 'claude-sonnet-4-5-20250929'
-      }
+      config.value = createDefaultConfig(props.account)
       testHistory.value = []
       loadConfig()
     }

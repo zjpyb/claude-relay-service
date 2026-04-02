@@ -1339,6 +1339,199 @@ class OpenAIResponsesRelayService {
     return `${baseUrl}${endpointPath}`
   }
 
+  _shouldResetAfterTestSuccess(account) {
+    if (!account) {
+      return false
+    }
+
+    return (
+      account.status === 'unauthorized' ||
+      account.status === 'rateLimited' ||
+      account.status === 'temp_error' ||
+      account.schedulable === 'false' ||
+      Boolean(account.errorMessage) ||
+      Boolean(account.quotaStoppedAt) ||
+      Boolean(account.unauthorizedAt) ||
+      Boolean(account.unauthorizedCount) ||
+      Boolean(account.rateLimitedAt) ||
+      Boolean(account.rateLimitStatus) ||
+      Boolean(account.rateLimitResetAt)
+    )
+  }
+
+  async _readProbeFailureMessage(response) {
+    if (!response?.data?.on) {
+      return `API Error: ${response?.status || 'unknown'}`
+    }
+
+    return await new Promise((resolve) => {
+      const chunks = []
+      let settled = false
+
+      const finalize = (message) => {
+        if (settled) {
+          return
+        }
+        settled = true
+        response.data.destroy?.()
+        resolve(message)
+      }
+
+      response.data.on('data', (chunk) => {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)))
+        const currentSize = chunks.reduce((sum, item) => sum + item.length, 0)
+        if (currentSize >= 16 * 1024) {
+          finalize(this._formatProbeFailureMessage(response.status, Buffer.concat(chunks).toString()))
+        }
+      })
+
+      response.data.on('end', () => {
+        finalize(this._formatProbeFailureMessage(response.status, Buffer.concat(chunks).toString()))
+      })
+
+      response.data.on('error', (error) => {
+        finalize(error.message || `API Error: ${response.status || 'unknown'}`)
+      })
+    })
+  }
+
+  _formatProbeFailureMessage(status, rawBody) {
+    const fallback = `API Error: ${status || 'unknown'}`
+    if (!rawBody || typeof rawBody !== 'string') {
+      return fallback
+    }
+
+    const body = rawBody.trim()
+    if (!body) {
+      return fallback
+    }
+
+    try {
+      return extractErrorMessage(JSON.parse(body), fallback)
+    } catch {
+      return body.length <= 300 ? body : body.slice(0, 300)
+    }
+  }
+
+  async _awaitProbeStreamReady(stream) {
+    if (!stream?.on) {
+      return
+    }
+
+    return await new Promise((resolve, reject) => {
+      let settled = false
+
+      const finalize = (handler, error) => {
+        if (settled) {
+          return
+        }
+        settled = true
+        stream.off?.('data', onData)
+        stream.off?.('end', onEnd)
+        stream.off?.('error', onError)
+        if (handler === 'reject') {
+          reject(error)
+          return
+        }
+        resolve()
+      }
+
+      const onData = () => {
+        stream.destroy?.()
+        finalize('resolve')
+      }
+      const onEnd = () => finalize('resolve')
+      const onError = (error) => finalize('reject', error)
+
+      stream.once('data', onData)
+      stream.once('end', onEnd)
+      stream.once('error', onError)
+    })
+  }
+
+  async testAccountConnectionSync(accountId, model = 'gpt-5.4') {
+    const startTime = Date.now()
+    let response = null
+
+    try {
+      const account = await openaiResponsesAccountService.getAccount(accountId)
+      if (!account) {
+        throw new Error('Account not found')
+      }
+
+      if (!account.apiKey) {
+        throw new Error('API Key not found or decryption failed')
+      }
+
+      const apiUrl = this._buildProbeTargetUrl(account)
+      const payload = createOpenAITestPayload(model, {
+        prompt: 'ping',
+        maxTokens: 16,
+        stream: true
+      })
+
+      const requestConfig = {
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${account.apiKey}`
+        },
+        timeout: 15000,
+        responseType: 'stream',
+        validateStatus: () => true
+      }
+
+      if (account.proxy) {
+        const proxyAgent = ProxyHelper.createProxyAgent(account.proxy)
+        if (proxyAgent) {
+          requestConfig.httpsAgent = proxyAgent
+          requestConfig.httpAgent = proxyAgent
+        }
+      }
+
+      logger.info(`🧪 Testing OpenAI-Responses account connection (sync): ${account.name} (${accountId})`)
+
+      response = await axios.post(apiUrl, payload, requestConfig)
+      if (response.status < 200 || response.status >= 400) {
+        const errorMessage = await this._readProbeFailureMessage(response)
+        return {
+          success: false,
+          error: errorMessage,
+          statusCode: response.status,
+          latencyMs: Date.now() - startTime,
+          timestamp: new Date().toISOString()
+        }
+      }
+
+      await this._awaitProbeStreamReady(response.data)
+
+      if (this._shouldResetAfterTestSuccess(account)) {
+        await openaiResponsesAccountService.resetAccountStatus(accountId, {
+          sendWebhook: false,
+          reason: 'Account recovered after scheduled connection test'
+        })
+        logger.warn(`✅ OpenAI-Responses账户 ${accountId} 定时测试成功，已自动重置异常状态`)
+      }
+
+      return {
+        success: true,
+        latencyMs: Date.now() - startTime,
+        model,
+        timestamp: new Date().toISOString()
+      }
+    } catch (error) {
+      logger.error(`❌ Test OpenAI-Responses account connection failed:`, error.message)
+      return {
+        success: false,
+        error: error.message,
+        statusCode: error.response?.status,
+        latencyMs: Date.now() - startTime,
+        timestamp: new Date().toISOString()
+      }
+    } finally {
+      response?.data?.destroy?.()
+    }
+  }
+
   async _retryQuotaExhausted429Request(
     req,
     res,
