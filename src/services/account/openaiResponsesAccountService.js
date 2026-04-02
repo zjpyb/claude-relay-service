@@ -549,8 +549,7 @@ class OpenAIResponsesAccountService {
       unauthorizedCount: '',
       rateLimitedAt: '',
       rateLimitStatus: '',
-      rateLimitResetAt: '',
-      rateLimitDuration: ''
+      rateLimitResetAt: ''
     }
 
     await this.updateAccount(accountId, updates)
