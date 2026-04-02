@@ -394,36 +394,25 @@ class OpenAIResponsesRelayService {
         )
 
         if (isDailyQuotaExceeded && account?.id) {
-          const { resetAt, resetsInSeconds } = this._computeNextDailyQuotaResetAt(
-            account.quotaResetTime || '00:00'
-          )
+          const { resetAt } = this._computeNextDailyQuotaResetAt(account.quotaResetTime || '00:00')
           logger.warn(
-            `💸 OpenAI Responses上游明确返回日额度耗尽，按402处理并限流到重置时间 for account ${account.id}, resetAt=${resetAt}`
+            `💸 OpenAI Responses上游明确返回日额度耗尽，按配置重置时间暂停调度 for account ${account.id}, resetAt=${resetAt}`
           )
 
           try {
             const oaiAutoProtectionDisabled =
               account?.disableAutoProtection === true || account?.disableAutoProtection === 'true'
             if (!oaiAutoProtectionDisabled) {
-              await unifiedOpenAIScheduler.markAccountRateLimited(
-                account.id,
-                'openai-responses',
-                sessionHash,
-                resetsInSeconds
-              )
-              await upstreamErrorHelper
-                .markTempUnavailable(
-                  account.id,
-                  'openai-responses',
-                  429,
-                  resetsInSeconds
-                )
-                .catch(() => {})
               await openaiResponsesAccountService.updateAccount(account.id, {
-                status: 'quotaExceeded',
+                status: 'quota_exceeded',
+                schedulable: 'false',
                 quotaStoppedAt: new Date().toISOString(),
+                rateLimitedAt: '',
+                rateLimitStatus: '',
+                rateLimitResetAt: '',
                 errorMessage: `Payment Required: 已达到每日费用限制，重置时间 ${resetAt}`
               })
+              await upstreamErrorHelper.clearTempUnavailable(account.id, 'openai-responses').catch(() => {})
             }
             if (sessionHash) {
               await unifiedOpenAIScheduler._deleteSessionMapping(sessionHash).catch(() => {})
@@ -697,36 +686,25 @@ class OpenAIResponsesRelayService {
         const isUpstreamSchedulerRateLimit = this._isUpstreamSchedulerRateLimit(status, errorData)
 
         if (isDailyQuotaExceeded && account?.id) {
-          const { resetAt, resetsInSeconds } = this._computeNextDailyQuotaResetAt(
-            account.quotaResetTime || '00:00'
-          )
+          const { resetAt } = this._computeNextDailyQuotaResetAt(account.quotaResetTime || '00:00')
           logger.warn(
-            `💸 OpenAI Responses上游明确返回日额度耗尽，按402处理并限流到重置时间 for account ${account.id} (catch handler), resetAt=${resetAt}`
+            `💸 OpenAI Responses上游明确返回日额度耗尽，按配置重置时间暂停调度 for account ${account.id} (catch handler), resetAt=${resetAt}`
           )
 
           try {
             const oaiAutoProtectionDisabled =
               account?.disableAutoProtection === true || account?.disableAutoProtection === 'true'
             if (!oaiAutoProtectionDisabled) {
-              await unifiedOpenAIScheduler.markAccountRateLimited(
-                account.id,
-                'openai-responses',
-                sessionHash,
-                resetsInSeconds
-              )
-              await upstreamErrorHelper
-                .markTempUnavailable(
-                  account.id,
-                  'openai-responses',
-                  429,
-                  resetsInSeconds
-                )
-                .catch(() => {})
               await openaiResponsesAccountService.updateAccount(account.id, {
-                status: 'quotaExceeded',
+                status: 'quota_exceeded',
+                schedulable: 'false',
                 quotaStoppedAt: new Date().toISOString(),
+                rateLimitedAt: '',
+                rateLimitStatus: '',
+                rateLimitResetAt: '',
                 errorMessage: `Payment Required: 已达到每日费用限制，重置时间 ${resetAt}`
               })
+              await upstreamErrorHelper.clearTempUnavailable(account.id, 'openai-responses').catch(() => {})
             }
             if (sessionHash) {
               await unifiedOpenAIScheduler._deleteSessionMapping(sessionHash).catch(() => {})

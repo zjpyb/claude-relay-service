@@ -4495,6 +4495,13 @@ const getSchedulableReason = (account) => {
     if (account.status === 'unauthorized') {
       return '认证失败（401错误）'
     }
+    if (
+      account.status === 'quota_exceeded' ||
+      account.status === 'quotaExceeded' ||
+      account.quotaStoppedAt
+    ) {
+      return '已达到每日费用限制'
+    }
     // 检查限流状态 - 兼容嵌套的 rateLimitStatus 对象
     if (
       (account.rateLimitStatus && account.rateLimitStatus.isRateLimited) ||
@@ -4610,7 +4617,12 @@ const getRoutingBlockReasons = (account) => {
     reasons.push(account.errorMessage || '账号被上游封禁')
   }
 
-  if (account.schedulable === false) {
+  const isQuotaBlocked =
+    account.status === 'quota_exceeded' ||
+    account.status === 'quotaExceeded' ||
+    !!account.quotaStoppedAt
+
+  if (account.schedulable === false && !isQuotaBlocked) {
     reasons.push(getSchedulableReason(account) || '已暂停调度')
   }
 

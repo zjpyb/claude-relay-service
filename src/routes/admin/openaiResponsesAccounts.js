@@ -459,12 +459,35 @@ router.post('/openai-responses-accounts/:id/reset-status', authenticateAdmin, as
 router.post('/openai-responses-accounts/:id/reset-usage', authenticateAdmin, async (req, res) => {
   try {
     const { id } = req.params
+    const account = await openaiResponsesAccountService.getAccount(id)
+    const shouldRestoreQuotaState =
+      account &&
+      (account.status === 'quota_exceeded' ||
+        account.status === 'quotaExceeded' ||
+        account.quotaStoppedAt)
 
-    await openaiResponsesAccountService.updateAccount(id, {
+    const updates = {
       dailyUsage: '0',
       lastResetDate: redis.getDateStringInTimezone(),
       quotaStoppedAt: ''
-    })
+    }
+
+    if (shouldRestoreQuotaState) {
+      updates.status = 'active'
+      updates.schedulable = 'true'
+      updates.errorMessage = ''
+      updates.rateLimitedAt = ''
+      updates.rateLimitStatus = ''
+      updates.rateLimitResetAt = ''
+    }
+
+    await openaiResponsesAccountService.updateAccount(id, updates)
+
+    if (shouldRestoreQuotaState) {
+      await require('../../utils/upstreamErrorHelper')
+        .clearTempUnavailable(id, 'openai-responses')
+        .catch(() => {})
+    }
 
     logger.success(`Admin manually reset daily usage for OpenAI-Responses account ${id}`)
 

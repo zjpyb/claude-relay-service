@@ -391,7 +391,15 @@ class OpenAIResponsesAccountService {
   // 检查并清除过期的限流状态
   async checkAndClearRateLimit(accountId) {
     const account = await this.getAccount(accountId)
-    if (!account || account.rateLimitStatus !== 'limited') {
+    if (!account) {
+      return false
+    }
+
+    if (await this._checkAndClearQuotaExceeded(account)) {
+      return true
+    }
+
+    if (account.rateLimitStatus !== 'limited') {
       return false
     }
 
@@ -477,13 +485,21 @@ class OpenAIResponsesAccountService {
 
       // 检查是否超出额度
       if (dailyQuota > 0 && newUsage >= dailyQuota) {
-        updates.status = 'quotaExceeded'
+        updates.status = 'quota_exceeded'
+        updates.schedulable = 'false'
         updates.quotaStoppedAt = new Date().toISOString()
         updates.errorMessage = `Daily quota exceeded: $${newUsage.toFixed(2)} / $${dailyQuota.toFixed(2)}`
+        updates.rateLimitedAt = ''
+        updates.rateLimitStatus = ''
+        updates.rateLimitResetAt = ''
         logger.warn(`💸 Account ${account.name} exceeded daily quota`)
       }
 
       await this.updateAccount(accountId, updates)
+
+      if (dailyQuota > 0 && newUsage >= dailyQuota) {
+        await upstreamErrorHelper.clearTempUnavailable(accountId, 'openai-responses').catch(() => {})
+      }
     }
   }
 
@@ -607,6 +623,61 @@ class OpenAIResponsesAccountService {
       remainingMinutes,
       willBeAvailableAt
     }
+  }
+
+  _computeNextDailyQuotaResetAt(resetTime = '00:00', referenceTime = new Date()) {
+    const referenceDate = referenceTime instanceof Date ? referenceTime : new Date(referenceTime)
+    const now = Number.isNaN(referenceDate.getTime()) ? new Date() : referenceDate
+    const tzNow = redis.getDateInTimezone(now)
+    const offsetMs = tzNow.getTime() - now.getTime()
+
+    const [h, m] = String(resetTime || '00:00')
+      .split(':')
+      .map((n) => parseInt(n, 10))
+
+    const resetHour = Number.isFinite(h) ? h : 0
+    const resetMinute = Number.isFinite(m) ? m : 0
+
+    const year = tzNow.getUTCFullYear()
+    const month = tzNow.getUTCMonth()
+    const day = tzNow.getUTCDate()
+
+    let resetAtMs = Date.UTC(year, month, day, resetHour, resetMinute, 0, 0) - offsetMs
+    if (resetAtMs <= now.getTime()) {
+      resetAtMs += 24 * 60 * 60 * 1000
+    }
+
+    return new Date(resetAtMs)
+  }
+
+  async _checkAndClearQuotaExceeded(account) {
+    if (!account?.quotaStoppedAt) {
+      return false
+    }
+
+    const quotaStoppedAt = new Date(account.quotaStoppedAt)
+    if (Number.isNaN(quotaStoppedAt.getTime())) {
+      return false
+    }
+
+    const nextResetAt = this._computeNextDailyQuotaResetAt(account.quotaResetTime || '00:00', quotaStoppedAt)
+    if (new Date() < nextResetAt) {
+      return false
+    }
+
+    const today = redis.getDateStringInTimezone()
+    await this.updateAccount(account.id, {
+      dailyUsage: '0',
+      lastResetDate: today,
+      quotaStoppedAt: '',
+      status: 'active',
+      schedulable: 'true',
+      errorMessage: ''
+    })
+    await upstreamErrorHelper.clearTempUnavailable(account.id, 'openai-responses').catch(() => {})
+
+    logger.info(`✅ Restored OpenAI-Responses account ${account.id} after daily quota reset`)
+    return true
   }
 
   // 加密敏感数据
