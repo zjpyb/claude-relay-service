@@ -353,9 +353,63 @@ class OpenAIResponsesRelayService {
           errorData
         })
 
-        if (this._isUpstreamSchedulerRateLimit(response.status, errorData) && account?.id) {
+        const isDailyQuotaExceeded = this._isDailyQuotaExceededError(response.status, errorData)
+        const isUpstreamSchedulerRateLimit = this._isUpstreamSchedulerRateLimit(
+          response.status,
+          errorData
+        )
+
+        if (isDailyQuotaExceeded && account?.id) {
+          const { resetAt, resetsInSeconds } = this._computeNextDailyQuotaResetAt(
+            account.quotaResetTime || '00:00'
+          )
           logger.warn(
-            `🚫 OpenAI Responses上游调度器返回400（模型当前无可路由账户），已按限流处理 for account ${account.id}`
+            `💸 OpenAI Responses上游明确返回日额度耗尽，按402处理并限流到重置时间 for account ${account.id}, resetAt=${resetAt}`
+          )
+
+          try {
+            const oaiAutoProtectionDisabled =
+              account?.disableAutoProtection === true || account?.disableAutoProtection === 'true'
+            if (!oaiAutoProtectionDisabled) {
+              await unifiedOpenAIScheduler.markAccountRateLimited(
+                account.id,
+                'openai-responses',
+                sessionHash,
+                resetsInSeconds
+              )
+              await upstreamErrorHelper
+                .markTempUnavailable(
+                  account.id,
+                  'openai-responses',
+                  429,
+                  resetsInSeconds
+                )
+                .catch(() => {})
+              await openaiResponsesAccountService.updateAccount(account.id, {
+                status: 'quotaExceeded',
+                quotaStoppedAt: new Date().toISOString(),
+                errorMessage: `Payment Required: 已达到每日费用限制，重置时间 ${resetAt}`
+              })
+            }
+            if (sessionHash) {
+              await unifiedOpenAIScheduler._deleteSessionMapping(sessionHash).catch(() => {})
+            }
+          } catch (markError) {
+            logger.warn(
+              'Failed to mark OpenAI-Responses account daily quota exceeded after upstream quota error:',
+              markError
+            )
+          }
+
+          req.removeListener('close', handleClientDisconnect)
+          res.removeListener('close', handleClientDisconnect)
+
+          return res.status(402).json(this._buildDailyQuotaExceededPayload(errorData, resetAt))
+        }
+
+        if (isUpstreamSchedulerRateLimit && account?.id) {
+          logger.warn(
+            `🚫 OpenAI Responses上游返回模型当前不可路由，已按限流处理 for account ${account.id}`
           )
 
           try {
@@ -376,7 +430,7 @@ class OpenAIResponsesRelayService {
             }
           } catch (markError) {
             logger.warn(
-              'Failed to mark OpenAI-Responses account rate limited after upstream scheduler 400:',
+              'Failed to mark OpenAI-Responses account rate limited after upstream unroutable-model error:',
               markError
             )
           }
@@ -452,7 +506,7 @@ class OpenAIResponsesRelayService {
         }
 
         // 处理 5xx 上游错误
-        if (response.status >= 500 && account?.id) {
+        if (response.status >= 500 && account?.id && !isUpstreamSchedulerRateLimit) {
           try {
             const oaiAutoProtectionDisabled =
               account?.disableAutoProtection === true || account?.disableAutoProtection === 'true'
@@ -605,9 +659,57 @@ class OpenAIResponsesRelayService {
           return res.status(401).json(unauthorizedResponse)
         }
 
-        if (this._isUpstreamSchedulerRateLimit(status, errorData) && account?.id) {
+        const isDailyQuotaExceeded = this._isDailyQuotaExceededError(status, errorData)
+        const isUpstreamSchedulerRateLimit = this._isUpstreamSchedulerRateLimit(status, errorData)
+
+        if (isDailyQuotaExceeded && account?.id) {
+          const { resetAt, resetsInSeconds } = this._computeNextDailyQuotaResetAt(
+            account.quotaResetTime || '00:00'
+          )
           logger.warn(
-            `🚫 OpenAI Responses上游调度器返回400（模型当前无可路由账户），已按限流处理 for account ${account.id} (catch handler)`
+            `💸 OpenAI Responses上游明确返回日额度耗尽，按402处理并限流到重置时间 for account ${account.id} (catch handler), resetAt=${resetAt}`
+          )
+
+          try {
+            const oaiAutoProtectionDisabled =
+              account?.disableAutoProtection === true || account?.disableAutoProtection === 'true'
+            if (!oaiAutoProtectionDisabled) {
+              await unifiedOpenAIScheduler.markAccountRateLimited(
+                account.id,
+                'openai-responses',
+                sessionHash,
+                resetsInSeconds
+              )
+              await upstreamErrorHelper
+                .markTempUnavailable(
+                  account.id,
+                  'openai-responses',
+                  429,
+                  resetsInSeconds
+                )
+                .catch(() => {})
+              await openaiResponsesAccountService.updateAccount(account.id, {
+                status: 'quotaExceeded',
+                quotaStoppedAt: new Date().toISOString(),
+                errorMessage: `Payment Required: 已达到每日费用限制，重置时间 ${resetAt}`
+              })
+            }
+            if (sessionHash) {
+              await unifiedOpenAIScheduler._deleteSessionMapping(sessionHash).catch(() => {})
+            }
+          } catch (markError) {
+            logger.warn(
+              'Failed to mark OpenAI-Responses account daily quota exceeded after upstream quota error in catch handler:',
+              markError
+            )
+          }
+
+          return res.status(402).json(this._buildDailyQuotaExceededPayload(errorData, resetAt))
+        }
+
+        if (isUpstreamSchedulerRateLimit && account?.id) {
+          logger.warn(
+            `🚫 OpenAI Responses上游返回模型当前不可路由，已按限流处理 for account ${account.id} (catch handler)`
           )
 
           try {
@@ -628,7 +730,7 @@ class OpenAIResponsesRelayService {
             }
           } catch (markError) {
             logger.warn(
-              'Failed to mark OpenAI-Responses account rate limited after upstream scheduler 400 in catch handler:',
+              'Failed to mark OpenAI-Responses account rate limited after upstream unroutable-model error in catch handler:',
               markError
             )
           }
@@ -1006,13 +1108,78 @@ class OpenAIResponsesRelayService {
       .toLowerCase()
   }
 
-  _isUpstreamSchedulerRateLimit(statusCode, errorData) {
-    if (statusCode !== 400) {
+  _isDailyQuotaExceededError(statusCode, errorData) {
+    if (statusCode !== 402 && statusCode !== 403) {
       return false
     }
 
     const errorText = this._get429ErrorText(errorData)
-    return errorText.includes('no available openai accounts support the requested model')
+    const explicitCode = String(errorData?.error?.code || '').toLowerCase()
+    const hasDailyAndLimit = errorText.includes('daily') && errorText.includes('limit')
+
+    return (
+      /用户额度不足|剩余额度/.test(errorText) ||
+      explicitCode === 'daily_cost_limit_exceeded' ||
+      explicitCode === 'daily_limit_exceeded' ||
+      hasDailyAndLimit
+    )
+  }
+
+  _isUpstreamSchedulerRateLimit(statusCode, errorData) {
+    if (statusCode !== 400 && statusCode !== 503) {
+      return false
+    }
+
+    const errorText = this._get429ErrorText(errorData)
+    return (
+      errorText.includes('no available openai accounts support the requested model') ||
+      errorText.includes('no available channel for model')
+    )
+  }
+
+  _computeNextDailyQuotaResetAt(resetTime = '00:00') {
+    const now = new Date()
+    const tzNow = redis.getDateInTimezone(now)
+    const offsetMs = tzNow.getTime() - now.getTime()
+
+    const [h, m] = String(resetTime || '00:00')
+      .split(':')
+      .map((n) => parseInt(n, 10))
+
+    const resetHour = Number.isFinite(h) ? h : 0
+    const resetMinute = Number.isFinite(m) ? m : 0
+
+    const year = tzNow.getUTCFullYear()
+    const month = tzNow.getUTCMonth()
+    const day = tzNow.getUTCDate()
+
+    let resetAtMs = Date.UTC(year, month, day, resetHour, resetMinute, 0, 0) - offsetMs
+    if (resetAtMs <= now.getTime()) {
+      resetAtMs += 24 * 60 * 60 * 1000
+    }
+
+    const resetAt = new Date(resetAtMs)
+    return {
+      resetAt: resetAt.toISOString(),
+      resetsInSeconds: Math.max(1, Math.ceil((resetAtMs - now.getTime()) / 1000))
+    }
+  }
+
+  _buildDailyQuotaExceededPayload(errorData, resetAt) {
+    const upstreamMessage =
+      typeof errorData?.error?.message === 'string' && errorData.error.message.trim()
+        ? errorData.error.message.trim()
+        : '已达到每日费用限制'
+
+    return {
+      error: {
+        type: 'insufficient_quota',
+        message: '已达到每日费用限制',
+        code: 'daily_cost_limit_exceeded',
+        upstreamMessage
+      },
+      resetAt
+    }
   }
 
   _resolve429ResetSeconds(errorData, headers) {
