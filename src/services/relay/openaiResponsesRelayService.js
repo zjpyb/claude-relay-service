@@ -353,6 +353,35 @@ class OpenAIResponsesRelayService {
           errorData
         })
 
+        if (this._isUpstreamSchedulerRateLimit(response.status, errorData) && account?.id) {
+          logger.warn(
+            `🚫 OpenAI Responses上游调度器返回400（模型当前无可路由账户），已按限流处理 for account ${account.id}`
+          )
+
+          try {
+            const oaiAutoProtectionDisabled =
+              account?.disableAutoProtection === true || account?.disableAutoProtection === 'true'
+            if (!oaiAutoProtectionDisabled) {
+              await unifiedOpenAIScheduler.markAccountRateLimited(
+                account.id,
+                'openai-responses',
+                sessionHash
+              )
+              await upstreamErrorHelper
+                .markTempUnavailable(account.id, 'openai-responses', 429)
+                .catch(() => {})
+            }
+            if (sessionHash) {
+              await unifiedOpenAIScheduler._deleteSessionMapping(sessionHash).catch(() => {})
+            }
+          } catch (markError) {
+            logger.warn(
+              'Failed to mark OpenAI-Responses account rate limited after upstream scheduler 400:',
+              markError
+            )
+          }
+        }
+
         if (response.status === 401) {
           logger.warn(`🚫 OpenAI Responses账号认证失败（401错误）for account ${account?.id}`)
 
@@ -398,6 +427,28 @@ class OpenAIResponsesRelayService {
           res.removeListener('close', handleClientDisconnect)
 
           return res.status(401).json(unauthorizedResponse)
+        }
+
+        if (response.status === 403 && account?.id) {
+          logger.warn(`🚫 OpenAI Responses账号触发403临时暂停 for account ${account.id}`)
+
+          try {
+            const oaiAutoProtectionDisabled =
+              account?.disableAutoProtection === true || account?.disableAutoProtection === 'true'
+            if (!oaiAutoProtectionDisabled) {
+              await upstreamErrorHelper
+                .markTempUnavailable(account.id, 'openai-responses', 403)
+                .catch(() => {})
+            }
+            if (sessionHash) {
+              await unifiedOpenAIScheduler._deleteSessionMapping(sessionHash).catch(() => {})
+            }
+          } catch (markError) {
+            logger.warn(
+              'Failed to mark OpenAI-Responses account temporarily unavailable after 403:',
+              markError
+            )
+          }
         }
 
         // 处理 5xx 上游错误
@@ -552,6 +603,59 @@ class OpenAIResponsesRelayService {
           }
 
           return res.status(401).json(unauthorizedResponse)
+        }
+
+        if (this._isUpstreamSchedulerRateLimit(status, errorData) && account?.id) {
+          logger.warn(
+            `🚫 OpenAI Responses上游调度器返回400（模型当前无可路由账户），已按限流处理 for account ${account.id} (catch handler)`
+          )
+
+          try {
+            const oaiAutoProtectionDisabled =
+              account?.disableAutoProtection === true || account?.disableAutoProtection === 'true'
+            if (!oaiAutoProtectionDisabled) {
+              await unifiedOpenAIScheduler.markAccountRateLimited(
+                account.id,
+                'openai-responses',
+                sessionHash
+              )
+              await upstreamErrorHelper
+                .markTempUnavailable(account.id, 'openai-responses', 429)
+                .catch(() => {})
+            }
+            if (sessionHash) {
+              await unifiedOpenAIScheduler._deleteSessionMapping(sessionHash).catch(() => {})
+            }
+          } catch (markError) {
+            logger.warn(
+              'Failed to mark OpenAI-Responses account rate limited after upstream scheduler 400 in catch handler:',
+              markError
+            )
+          }
+        }
+
+        if (status === 403 && account?.id) {
+          logger.warn(
+            `🚫 OpenAI Responses账号触发403临时暂停 for account ${account.id} (catch handler)`
+          )
+
+          try {
+            const oaiAutoProtectionDisabled =
+              account?.disableAutoProtection === true || account?.disableAutoProtection === 'true'
+            if (!oaiAutoProtectionDisabled) {
+              await upstreamErrorHelper
+                .markTempUnavailable(account.id, 'openai-responses', 403)
+                .catch(() => {})
+            }
+            if (sessionHash) {
+              await unifiedOpenAIScheduler._deleteSessionMapping(sessionHash).catch(() => {})
+            }
+          } catch (markError) {
+            logger.warn(
+              'Failed to mark OpenAI-Responses account temporarily unavailable after 403 in catch handler:',
+              markError
+            )
+          }
         }
 
         return res.status(status).json(upstreamErrorHelper.sanitizeErrorForClient(errorData))
@@ -886,10 +990,81 @@ class OpenAIResponsesRelayService {
     })
   }
 
+  _get429ErrorText(errorData) {
+    const candidates = [
+      errorData?.error?.message,
+      errorData?.error?.code,
+      errorData?.error?.type,
+      errorData?.message,
+      errorData?.code,
+      errorData?.reason
+    ]
+
+    return candidates
+      .filter((value) => typeof value === 'string' && value.trim())
+      .join(' | ')
+      .toLowerCase()
+  }
+
+  _isUpstreamSchedulerRateLimit(statusCode, errorData) {
+    if (statusCode !== 400) {
+      return false
+    }
+
+    const errorText = this._get429ErrorText(errorData)
+    return errorText.includes('no available openai accounts support the requested model')
+  }
+
+  _resolve429ResetSeconds(errorData, headers) {
+    let resetsInSeconds = null
+    let cooldownReason = 'default'
+
+    if (errorData?.error?.resets_in_seconds) {
+      resetsInSeconds = Number(errorData.error.resets_in_seconds)
+      cooldownReason = 'response_error_resets_in_seconds'
+    } else if (errorData?.error?.resets_in) {
+      resetsInSeconds = Number(errorData.error.resets_in)
+      cooldownReason = 'response_error_resets_in'
+    } else if (errorData?.resets_in_seconds) {
+      resetsInSeconds = Number(errorData.resets_in_seconds)
+      cooldownReason = 'response_resets_in_seconds'
+    }
+
+    if (!Number.isFinite(resetsInSeconds) || resetsInSeconds <= 0) {
+      resetsInSeconds = upstreamErrorHelper.parseRetryAfter(headers)
+      if (resetsInSeconds) {
+        cooldownReason = 'retry_after_header'
+      }
+    }
+
+    if (!Number.isFinite(resetsInSeconds) || resetsInSeconds <= 0) {
+      const errorText = this._get429ErrorText(errorData)
+      const quotaExhaustedPattern =
+        /daily_limit_exceeded|usage_limit_exceeded|daily usage limit exceeded|the usage limit has been reached|当前订阅余额已用尽|余额已用尽|subscription.*余额|subscription balance|insufficient.*quota|额度不足|剩余额度/
+      const transientLimitPattern = /too many pending requests|达到请求数限制|最多请求/
+
+      // 配额耗尽类 429 通常不会很快恢复，给一个更长的兜底冷却时间。
+      if (quotaExhaustedPattern.test(errorText)) {
+        resetsInSeconds = 12 * 60 * 60
+        cooldownReason = 'quota_exhausted_fallback'
+      } else if (transientLimitPattern.test(errorText)) {
+        resetsInSeconds = 5 * 60
+        cooldownReason = 'transient_rate_limit_fallback'
+      }
+    }
+
+    return {
+      resetsInSeconds:
+        Number.isFinite(resetsInSeconds) && resetsInSeconds > 0 ? Math.ceil(resetsInSeconds) : null,
+      cooldownReason
+    }
+  }
+
   // 处理 429 限流错误
   async _handle429Error(account, response, isStream = false, sessionHash = null) {
     let resetsInSeconds = null
     let errorData = null
+    let cooldownReason = 'default'
 
     try {
       // 对于429错误，响应可能是JSON或SSE格式
@@ -946,23 +1121,15 @@ class OpenAIResponsesRelayService {
         errorData = response.data
       }
 
-      // 从响应体中提取重置时间（OpenAI 标准格式）
-      if (errorData && errorData.error) {
-        if (errorData.error.resets_in_seconds) {
-          resetsInSeconds = errorData.error.resets_in_seconds
-          logger.info(
-            `🕐 Rate limit will reset in ${resetsInSeconds} seconds (${Math.ceil(resetsInSeconds / 60)} minutes / ${Math.ceil(resetsInSeconds / 3600)} hours)`
-          )
-        } else if (errorData.error.resets_in) {
-          // 某些 API 可能使用不同的字段名
-          resetsInSeconds = parseInt(errorData.error.resets_in)
-          logger.info(
-            `🕐 Rate limit will reset in ${resetsInSeconds} seconds (${Math.ceil(resetsInSeconds / 60)} minutes / ${Math.ceil(resetsInSeconds / 3600)} hours)`
-          )
-        }
-      }
+      const resolvedCooldown = this._resolve429ResetSeconds(errorData, response.headers)
+      resetsInSeconds = resolvedCooldown.resetsInSeconds
+      cooldownReason = resolvedCooldown.cooldownReason
 
-      if (!resetsInSeconds) {
+      if (resetsInSeconds) {
+        logger.info(
+          `🕐 Rate limit will reset in ${resetsInSeconds} seconds (${Math.ceil(resetsInSeconds / 60)} minutes / ${Math.ceil(resetsInSeconds / 3600)} hours), reason=${cooldownReason}`
+        )
+      } else {
         logger.warn('⚠️ Could not extract reset time from 429 response, using default 60 minutes')
       }
     } catch (e) {
@@ -981,6 +1148,7 @@ class OpenAIResponsesRelayService {
       accountId: account.id,
       accountName: account.name,
       resetsInSeconds: resetsInSeconds || 'unknown',
+      cooldownReason,
       resetInMinutes: resetsInSeconds ? Math.ceil(resetsInSeconds / 60) : 60,
       resetInHours: resetsInSeconds ? Math.ceil(resetsInSeconds / 3600) : 1
     })
