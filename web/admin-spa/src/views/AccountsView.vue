@@ -2312,6 +2312,7 @@ const lastAutoRecoveryReloadTs = ref(0)
 const accountsSortBy = ref('name')
 const accountsSortOrder = ref('asc')
 const apiKeys = ref([]) // 保留用于其他功能（如删除账户时显示绑定信息）
+let attemptedAutoRecoverySignatures = new Set()
 const bindingCounts = ref({}) // 轻量级绑定计数，用于显示"绑定: X 个API Key"
 const accountGroups = ref([])
 const groupFilter = ref('all')
@@ -3510,6 +3511,14 @@ const loadAccounts = async (forceReload = false) => {
     }
 
     accounts.value = filteredAccounts
+    const currentAutoRecoverySignatures = new Set(
+      filteredAccounts.map((account) => getAccountAutoRecoverySignature(account)).filter(Boolean)
+    )
+    attemptedAutoRecoverySignatures = new Set(
+      Array.from(attemptedAutoRecoverySignatures).filter((signature) =>
+        currentAutoRecoverySignatures.has(signature)
+      )
+    )
     cleanupSelectedAccounts()
 
     // 异步加载 Claude OAuth 账户的 usage 数据
@@ -4001,12 +4010,48 @@ const getAccountAutoRecoveryAt = (account) => {
   return new Date(Math.min(...recoveryCandidates)).toISOString()
 }
 
+const isAccountPendingAutoRecovery = (account) => {
+  if (!account) return false
+
+  const isQuotaBlocked =
+    account.status === 'quota_exceeded' ||
+    account.status === 'quotaExceeded' ||
+    !!account.quotaStoppedAt
+
+  const isRateLimited =
+    account.status === 'rateLimited' ||
+    account.rateLimitStatus === 'limited' ||
+    (account.rateLimitStatus &&
+      typeof account.rateLimitStatus === 'object' &&
+      account.rateLimitStatus.isRateLimited === true)
+
+  return Boolean(account.tempUnavailable || isQuotaBlocked || isRateLimited)
+}
+
+const getAccountAutoRecoverySignature = (account) => {
+  if (!isAccountPendingAutoRecovery(account)) {
+    return ''
+  }
+
+  const recoveryAt = getAccountAutoRecoveryAt(account)
+  if (!recoveryAt) {
+    return ''
+  }
+
+  return `${account.id}:${account.status || ''}:${account.schedulable === false ? 'paused' : 'schedulable'}:${recoveryAt}`
+}
+
 const shouldAutoReloadRecoveredAccounts = (nowTs) => {
   if (accountsLoading.value || !Array.isArray(accounts.value) || accounts.value.length === 0) {
     return false
   }
 
   return accounts.value.some((account) => {
+    const recoverySignature = getAccountAutoRecoverySignature(account)
+    if (!recoverySignature || attemptedAutoRecoverySignatures.has(recoverySignature)) {
+      return false
+    }
+
     const recoveryAt = getAccountAutoRecoveryAt(account)
     if (!recoveryAt) {
       return false
@@ -5394,6 +5439,18 @@ onMounted(() => {
       nowTs - lastAutoRecoveryReloadTs.value >= AUTO_RECOVERY_RELOAD_COOLDOWN_MS &&
       shouldAutoReloadRecoveredAccounts(nowTs)
     ) {
+      accounts.value.forEach((account) => {
+        const recoverySignature = getAccountAutoRecoverySignature(account)
+        if (!recoverySignature) {
+          return
+        }
+
+        const recoveryAt = getAccountAutoRecoveryAt(account)
+        const recoveryAtTs = new Date(recoveryAt).getTime()
+        if (!Number.isNaN(recoveryAtTs) && recoveryAtTs <= nowTs) {
+          attemptedAutoRecoverySignatures.add(recoverySignature)
+        }
+      })
       lastAutoRecoveryReloadTs.value = nowTs
       loadAccounts(true)
     }
