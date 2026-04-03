@@ -19,6 +19,8 @@ const { createOpenAITestPayload, extractErrorMessage } = require('../../utils/te
 const { getProxyAgent } = require('../../utils/proxyHelper')
 
 const router = express.Router()
+const DEFAULT_OPENAI_TEST_USER_AGENT =
+  'codex-tui/0.118.0 (Mac OS 12.6.9; x86_64) Apple_Terminal (codex-tui; 0.118.0)'
 
 // ==================== OpenAI-Responses 账户管理 API ====================
 
@@ -679,7 +681,11 @@ router.post('/openai-responses-accounts/:accountId/test', authenticateAdmin, asy
     const requestConfig = {
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${account.apiKey}`
+        Authorization: `Bearer ${account.apiKey}`,
+        'User-Agent':
+          (typeof account.userAgent === 'string' && account.userAgent.trim()) ||
+          req.headers['user-agent'] ||
+          DEFAULT_OPENAI_TEST_USER_AGENT
       },
       timeout: 30000
     }

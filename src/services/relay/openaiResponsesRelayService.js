@@ -12,6 +12,8 @@ const { v4: uuidv4 } = require('uuid')
 const LRUCache = require('../../utils/lruCache')
 const upstreamErrorHelper = require('../../utils/upstreamErrorHelper')
 const { createOpenAITestPayload, extractErrorMessage } = require('../../utils/testPayloadHelper')
+const DEFAULT_OPENAI_TEST_USER_AGENT =
+  'codex-tui/0.118.0 (Mac OS 12.6.9; x86_64) Apple_Terminal (codex-tui; 0.118.0)'
 
 // lastUsedAt 更新节流（每账户 60 秒内最多更新一次，使用 LRU 防止内存泄漏）
 const lastUsedAtThrottle = new LRUCache(1000) // 最多缓存 1000 个账户
@@ -234,6 +236,9 @@ class OpenAIResponsesRelayService {
         // 透传原始 User-Agent
         headers['User-Agent'] = req.headers['user-agent']
         logger.debug(`📱 Forwarding original User-Agent: ${req.headers['user-agent']}`)
+      } else {
+        headers['User-Agent'] = DEFAULT_OPENAI_TEST_USER_AGENT
+        logger.debug(`📱 Using default User-Agent: ${DEFAULT_OPENAI_TEST_USER_AGENT}`)
       }
 
       // 配置请求选项
@@ -1701,6 +1706,21 @@ class OpenAIResponsesRelayService {
     return `${baseUrl}${endpointPath}`
   }
 
+  _buildProbeHeaders(account) {
+    const headers = {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${account?.apiKey || ''}`
+    }
+
+    if (typeof account?.userAgent === 'string' && account.userAgent.trim()) {
+      headers['User-Agent'] = account.userAgent.trim()
+    } else {
+      headers['User-Agent'] = DEFAULT_OPENAI_TEST_USER_AGENT
+    }
+
+    return headers
+  }
+
   _shouldResetAfterTestSuccess(account) {
     if (!account) {
       return false
@@ -1833,10 +1853,7 @@ class OpenAIResponsesRelayService {
       })
 
       const requestConfig = {
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${account.apiKey}`
-        },
+        headers: this._buildProbeHeaders(account),
         timeout: 15000,
         responseType: 'stream',
         validateStatus: () => true
@@ -2101,10 +2118,7 @@ class OpenAIResponsesRelayService {
     })
 
     const requestConfig = {
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${account.apiKey}`
-      },
+      headers: this._buildProbeHeaders(account),
       timeout: 15000,
       responseType: 'stream',
       validateStatus: () => true
