@@ -293,15 +293,42 @@ class OpenAIResponsesRelayService {
         }
 
         if (isQuotaExhausted) {
-          await upstreamErrorHelper
-            .recordErrorHistory(
-              account.id,
-              'openai-responses',
-              429,
-              'quota_exceeded',
-              historyContext
-            )
-            .catch(() => {})
+          const { resetAt } = await this._markQuotaExceededUntilReset(account, 429, errorData, {
+            model: req.body?.model,
+            path: req.originalUrl,
+            sessionHash,
+            sourceLabel: '上游明确返回余额耗尽/日限额'
+          })
+
+          const retryCount = Number(req._openaiResponses429RetryCount || 0)
+          if (retryCount < 3) {
+            try {
+              req._openaiResponses429RetryCount = retryCount + 1
+              const retried = await this._retryUnavailableRequest(
+                req,
+                res,
+                account,
+                apiKeyData,
+                sessionHash,
+                handleClientDisconnect,
+                releaseConcurrency,
+                {
+                  reasonLabel: '429 配额型错误',
+                  isQuotaExhausted: true,
+                  retryCount: req._openaiResponses429RetryCount
+                }
+              )
+              if (retried) {
+                return res
+              }
+            } catch (retryError) {
+              logger.warn(
+                `Failed to retry OpenAI-Responses request after quota-like 429 for ${account.id}: ${retryError.message}`
+              )
+            }
+          }
+
+          return res.status(402).json(this._buildDailyQuotaExceededPayload(errorData, resetAt))
         }
 
         if (!oaiAutoProtectionDisabled) {
@@ -314,16 +341,13 @@ class OpenAIResponsesRelayService {
               isQuotaExhausted ? { ...historyContext, skipHistory: true } : historyContext
             )
             .catch(() => {})
-
-          if (isQuotaExhausted) {
-            this._probeQuotaExhausted429Recovery(fullAccount, req.body?.model).catch(
-              (probeError) => {
-                logger.warn(
-                  `Failed to probe OpenAI-Responses account availability after quota-like 429 for ${account.id}: ${probeError.message}`
-                )
-              }
-            )
-          }
+          this._probeTemporaryRecovery(fullAccount || account, req.body?.model, '429限流').catch(
+            (probeError) => {
+              logger.warn(
+                `Failed to probe OpenAI-Responses account availability after 429 for ${account.id}: ${probeError.message}`
+              )
+            }
+          )
         }
 
         const retryCount = Number(req._openaiResponses429RetryCount || 0)
@@ -418,84 +442,57 @@ class OpenAIResponsesRelayService {
         )
 
         if (isDailyQuotaExceeded && account?.id) {
-          const { resetAt } = this._computeNextDailyQuotaResetAt(account.quotaResetTime || '00:00')
-          logger.warn(
-            `💸 OpenAI Responses上游明确返回日额度耗尽，按配置重置时间暂停调度 for account ${account.id}, resetAt=${resetAt}`
-          )
-
           try {
-            const oaiAutoProtectionDisabled =
-              account?.disableAutoProtection === true || account?.disableAutoProtection === 'true'
-            await upstreamErrorHelper
-              .recordErrorHistory(
-                account.id,
-                'openai-responses',
-                response.status,
-                'quota_exceeded',
-                {
-                  model: req.body?.model,
-                  path: req.originalUrl,
-                  errorBody: errorData,
-                  resetAt
+            const { resetAt } = await this._markQuotaExceededUntilReset(
+              account,
+              response.status,
+              errorData,
+              {
+                model: req.body?.model,
+                path: req.originalUrl,
+                sessionHash,
+                sourceLabel: '上游明确返回日额度耗尽'
+              }
+            )
+
+            const retryCount = Number(req._openaiResponses429RetryCount || 0)
+            if (retryCount < 3) {
+              try {
+                req._openaiResponses429RetryCount = retryCount + 1
+                const retried = await this._retryUnavailableRequest(
+                  req,
+                  res,
+                  account,
+                  apiKeyData,
+                  sessionHash,
+                  handleClientDisconnect,
+                  releaseConcurrency,
+                  {
+                    reasonLabel: `${response.status} 配额型错误`,
+                    isQuotaExhausted: true,
+                    retryCount: req._openaiResponses429RetryCount
+                  }
+                )
+                if (retried) {
+                  return res
                 }
-              )
-              .catch(() => {})
-            if (!oaiAutoProtectionDisabled) {
-              await openaiResponsesAccountService.updateAccount(account.id, {
-                status: 'quota_exceeded',
-                schedulable: 'false',
-                quotaStoppedAt: new Date().toISOString(),
-                rateLimitedAt: '',
-                rateLimitStatus: '',
-                rateLimitResetAt: '',
-                errorMessage: `Payment Required: 已达到每日费用限制，重置时间 ${resetAt}`
-              })
-              await upstreamErrorHelper
-                .clearTempUnavailable(account.id, 'openai-responses')
-                .catch(() => {})
+              } catch (retryError) {
+                logger.warn(
+                  `Failed to retry OpenAI-Responses request after quota-like ${response.status} for ${account.id}: ${retryError.message}`
+                )
+              }
             }
-            if (sessionHash) {
-              await unifiedOpenAIScheduler._deleteSessionMapping(sessionHash).catch(() => {})
-            }
+
+            req.removeListener('close', handleClientDisconnect)
+            res.removeListener('close', handleClientDisconnect)
+
+            return res.status(402).json(this._buildDailyQuotaExceededPayload(errorData, resetAt))
           } catch (markError) {
             logger.warn(
               'Failed to mark OpenAI-Responses account daily quota exceeded after upstream quota error:',
               markError
             )
           }
-
-          const retryCount = Number(req._openaiResponses429RetryCount || 0)
-          if (retryCount < 3) {
-            try {
-              req._openaiResponses429RetryCount = retryCount + 1
-              const retried = await this._retryUnavailableRequest(
-                req,
-                res,
-                account,
-                apiKeyData,
-                sessionHash,
-                handleClientDisconnect,
-                releaseConcurrency,
-                {
-                  reasonLabel: `${response.status} 配额型错误`,
-                  isQuotaExhausted: true,
-                  retryCount: req._openaiResponses429RetryCount
-                }
-              )
-              if (retried) {
-                return res
-              }
-            } catch (retryError) {
-              logger.warn(
-                `Failed to retry OpenAI-Responses request after quota-like ${response.status} for ${account.id}: ${retryError.message}`
-              )
-            }
-          }
-
-          req.removeListener('close', handleClientDisconnect)
-          res.removeListener('close', handleClientDisconnect)
-
-          return res.status(402).json(this._buildDailyQuotaExceededPayload(errorData, resetAt))
         }
 
         if (isUpstreamSchedulerRateLimit && account?.id) {
@@ -666,6 +663,13 @@ class OpenAIResponsesRelayService {
               await upstreamErrorHelper
                 .markTempUnavailable(account.id, 'openai-responses', 403)
                 .catch(() => {})
+              this._probeTemporaryRecovery(fullAccount || account, req.body?.model, '403错误').catch(
+                (probeError) => {
+                  logger.warn(
+                    `Failed to probe OpenAI-Responses account availability after 403 for ${account.id}: ${probeError.message}`
+                  )
+                }
+              )
             }
             if (sessionHash) {
               await unifiedOpenAIScheduler._deleteSessionMapping(sessionHash).catch(() => {})
@@ -675,6 +679,33 @@ class OpenAIResponsesRelayService {
               'Failed to mark OpenAI-Responses account temporarily unavailable after 403:',
               markError
             )
+          }
+
+          const retryCount = Number(req._openaiResponses429RetryCount || 0)
+          if (retryCount < 3) {
+            try {
+              req._openaiResponses429RetryCount = retryCount + 1
+              const retried = await this._retryUnavailableRequest(
+                req,
+                res,
+                account,
+                apiKeyData,
+                sessionHash,
+                handleClientDisconnect,
+                releaseConcurrency,
+                {
+                  reasonLabel: '403 错误',
+                  retryCount: req._openaiResponses429RetryCount
+                }
+              )
+              if (retried) {
+                return res
+              }
+            } catch (retryError) {
+              logger.warn(
+                `Failed to retry OpenAI-Responses request after 403 for ${account.id}: ${retryError.message}`
+              )
+            }
           }
         }
 
@@ -689,6 +720,15 @@ class OpenAIResponsesRelayService {
                 'openai-responses',
                 response.status
               )
+              this._probeTemporaryRecovery(
+                fullAccount || account,
+                req.body?.model,
+                `${response.status} 上游错误`
+              ).catch((probeError) => {
+                logger.warn(
+                  `Failed to probe OpenAI-Responses account availability after upstream ${response.status} for ${account.id}: ${probeError.message}`
+                )
+              })
             }
             if (sessionHash) {
               await unifiedOpenAIScheduler._deleteSessionMapping(sessionHash).catch(() => {})
@@ -897,75 +937,49 @@ class OpenAIResponsesRelayService {
         const isUpstreamSchedulerRateLimit = this._isUpstreamSchedulerRateLimit(status, errorData)
 
         if (isDailyQuotaExceeded && account?.id) {
-          const { resetAt } = this._computeNextDailyQuotaResetAt(account.quotaResetTime || '00:00')
-          logger.warn(
-            `💸 OpenAI Responses上游明确返回日额度耗尽，按配置重置时间暂停调度 for account ${account.id} (catch handler), resetAt=${resetAt}`
-          )
-
           try {
-            const oaiAutoProtectionDisabled =
-              account?.disableAutoProtection === true || account?.disableAutoProtection === 'true'
-            await upstreamErrorHelper
-              .recordErrorHistory(account.id, 'openai-responses', status, 'quota_exceeded', {
-                model: req.body?.model,
-                path: req.originalUrl,
-                errorBody: errorData,
-                resetAt
-              })
-              .catch(() => {})
-            if (!oaiAutoProtectionDisabled) {
-              await openaiResponsesAccountService.updateAccount(account.id, {
-                status: 'quota_exceeded',
-                schedulable: 'false',
-                quotaStoppedAt: new Date().toISOString(),
-                rateLimitedAt: '',
-                rateLimitStatus: '',
-                rateLimitResetAt: '',
-                errorMessage: `Payment Required: 已达到每日费用限制，重置时间 ${resetAt}`
-              })
-              await upstreamErrorHelper
-                .clearTempUnavailable(account.id, 'openai-responses')
-                .catch(() => {})
+            const { resetAt } = await this._markQuotaExceededUntilReset(account, status, errorData, {
+              model: req.body?.model,
+              path: req.originalUrl,
+              sessionHash,
+              sourceLabel: '上游明确返回日额度耗尽'
+            })
+
+            const retryCount = Number(req._openaiResponses429RetryCount || 0)
+            if (retryCount < 3) {
+              try {
+                req._openaiResponses429RetryCount = retryCount + 1
+                const retried = await this._retryUnavailableRequest(
+                  req,
+                  res,
+                  account,
+                  apiKeyData,
+                  sessionHash,
+                  handleClientDisconnect,
+                  releaseConcurrency,
+                  {
+                    reasonLabel: `${status} 配额型错误`,
+                    isQuotaExhausted: true,
+                    retryCount: req._openaiResponses429RetryCount
+                  }
+                )
+                if (retried) {
+                  return res
+                }
+              } catch (retryError) {
+                logger.warn(
+                  `Failed to retry OpenAI-Responses request after quota-like ${status} in catch handler for ${account.id}: ${retryError.message}`
+                )
+              }
             }
-            if (sessionHash) {
-              await unifiedOpenAIScheduler._deleteSessionMapping(sessionHash).catch(() => {})
-            }
+
+            return res.status(402).json(this._buildDailyQuotaExceededPayload(errorData, resetAt))
           } catch (markError) {
             logger.warn(
               'Failed to mark OpenAI-Responses account daily quota exceeded after upstream quota error in catch handler:',
               markError
             )
           }
-
-          const retryCount = Number(req._openaiResponses429RetryCount || 0)
-          if (retryCount < 3) {
-            try {
-              req._openaiResponses429RetryCount = retryCount + 1
-              const retried = await this._retryUnavailableRequest(
-                req,
-                res,
-                account,
-                apiKeyData,
-                sessionHash,
-                handleClientDisconnect,
-                releaseConcurrency,
-                {
-                  reasonLabel: `${status} 配额型错误`,
-                  isQuotaExhausted: true,
-                  retryCount: req._openaiResponses429RetryCount
-                }
-              )
-              if (retried) {
-                return res
-              }
-            } catch (retryError) {
-              logger.warn(
-                `Failed to retry OpenAI-Responses request after quota-like ${status} in catch handler for ${account.id}: ${retryError.message}`
-              )
-            }
-          }
-
-          return res.status(402).json(this._buildDailyQuotaExceededPayload(errorData, resetAt))
         }
 
         if (isUpstreamSchedulerRateLimit && account?.id) {
@@ -1057,6 +1071,13 @@ class OpenAIResponsesRelayService {
               await upstreamErrorHelper
                 .markTempUnavailable(account.id, 'openai-responses', 403)
                 .catch(() => {})
+              this._probeTemporaryRecovery(fullAccount || account, req.body?.model, '403错误').catch(
+                (probeError) => {
+                  logger.warn(
+                    `Failed to probe OpenAI-Responses account availability after 403 in catch handler for ${account.id}: ${probeError.message}`
+                  )
+                }
+              )
             }
             if (sessionHash) {
               await unifiedOpenAIScheduler._deleteSessionMapping(sessionHash).catch(() => {})
@@ -1066,6 +1087,33 @@ class OpenAIResponsesRelayService {
               'Failed to mark OpenAI-Responses account temporarily unavailable after 403 in catch handler:',
               markError
             )
+          }
+
+          const retryCount = Number(req._openaiResponses429RetryCount || 0)
+          if (retryCount < 3) {
+            try {
+              req._openaiResponses429RetryCount = retryCount + 1
+              const retried = await this._retryUnavailableRequest(
+                req,
+                res,
+                account,
+                apiKeyData,
+                sessionHash,
+                handleClientDisconnect,
+                releaseConcurrency,
+                {
+                  reasonLabel: '403 错误',
+                  retryCount: req._openaiResponses429RetryCount
+                }
+              )
+              if (retried) {
+                return res
+              }
+            } catch (retryError) {
+              logger.warn(
+                `Failed to retry OpenAI-Responses request after 403 in catch handler for ${account.id}: ${retryError.message}`
+              )
+            }
           }
         }
 
@@ -1077,6 +1125,15 @@ class OpenAIResponsesRelayService {
               await upstreamErrorHelper
                 .markTempUnavailable(account.id, 'openai-responses', status)
                 .catch(() => {})
+              this._probeTemporaryRecovery(
+                fullAccount || account,
+                req.body?.model,
+                `${status} 上游错误`
+              ).catch((probeError) => {
+                logger.warn(
+                  `Failed to probe OpenAI-Responses account availability after upstream ${status} in catch handler for ${account.id}: ${probeError.message}`
+                )
+              })
             }
             if (sessionHash) {
               await unifiedOpenAIScheduler._deleteSessionMapping(sessionHash).catch(() => {})
@@ -1317,52 +1374,36 @@ class OpenAIResponsesRelayService {
           : null
 
         if (rateLimitIsQuotaExhausted) {
-          const resolvedCooldown = this._resolve429ResetSeconds(rateLimitErrorData, null)
-          const cooldownSeconds = rateLimitResetsInSeconds || resolvedCooldown.resetsInSeconds
+          await this._markQuotaExceededUntilReset(account, 429, rateLimitErrorData, {
+            model: req.body?.model,
+            path: req.originalUrl,
+            sessionHash,
+            sourceLabel: '流式响应中明确返回余额耗尽/日限额'
+          })
+
+          logger.warn(`🚫 Processing quota-like 429 for OpenAI-Responses account ${account.id} from stream`)
+        } else {
           const historyContext = {
             model: req.body?.model,
             path: req.originalUrl,
             errorBody: rateLimitErrorData
           }
-
           await upstreamErrorHelper
-            .recordErrorHistory(
+            .markTempUnavailable(
               account.id,
               'openai-responses',
               429,
-              'quota_exceeded',
+              rateLimitResetsInSeconds,
               historyContext
             )
             .catch(() => {})
-
-          await upstreamErrorHelper
-            .markTempUnavailable(account.id, 'openai-responses', 429, cooldownSeconds, {
-              ...historyContext,
-              skipHistory: true
-            })
-            .catch(() => {})
-
-          this._probeQuotaExhausted429Recovery(account, req.body?.model).catch((probeError) => {
+          this._probeTemporaryRecovery(account, req.body?.model, '429限流').catch((probeError) => {
             logger.warn(
-              `Failed to probe OpenAI-Responses stream account availability after quota-like 429 for ${account.id}: ${probeError.message}`
+              `Failed to probe OpenAI-Responses stream account availability after 429 for ${account.id}: ${probeError.message}`
             )
           })
 
-          logger.warn(
-            `🚫 Processing quota-like 429 for OpenAI-Responses account ${account.id} from stream with temp pause only`
-          )
-        } else {
-          // 使用统一调度器处理普通限流（与非流式响应保持一致）
-          await unifiedOpenAIScheduler.markAccountRateLimited(
-            account.id,
-            'openai-responses',
-            sessionHash,
-            rateLimitResetsInSeconds
-          )
-
-          logger.warn(
-            `🚫 Processing rate limit for OpenAI-Responses account ${account.id} from stream`
-          )
+          logger.warn(`🚫 Processing temporary 429 for OpenAI-Responses account ${account.id} from stream`)
         }
       }
 
@@ -1577,6 +1618,52 @@ class OpenAIResponsesRelayService {
       },
       resetAt
     }
+  }
+
+  async _markQuotaExceededUntilReset(account, statusCode, errorData, options = {}) {
+    if (!account?.id) {
+      return { resetAt: null, resetsInSeconds: null }
+    }
+
+    const { model = null, path = null, sessionHash = null, sourceLabel = '上游配额错误' } = options
+    const { resetAt, resetsInSeconds } = this._computeNextDailyQuotaResetAt(
+      account.quotaResetTime || '00:00'
+    )
+
+    logger.warn(
+      `💸 OpenAI Responses${sourceLabel}，按配置重置时间暂停调度 for account ${account.id}, resetAt=${resetAt}`
+    )
+
+    const oaiAutoProtectionDisabled =
+      account?.disableAutoProtection === true || account?.disableAutoProtection === 'true'
+
+    await upstreamErrorHelper
+      .recordErrorHistory(account.id, 'openai-responses', statusCode, 'quota_exceeded', {
+        model,
+        path,
+        errorBody: errorData,
+        resetAt
+      })
+      .catch(() => {})
+
+    if (!oaiAutoProtectionDisabled) {
+      await openaiResponsesAccountService.updateAccount(account.id, {
+        status: 'quota_exceeded',
+        schedulable: 'false',
+        quotaStoppedAt: new Date().toISOString(),
+        rateLimitedAt: '',
+        rateLimitStatus: '',
+        rateLimitResetAt: '',
+        errorMessage: `Payment Required: 已达到每日费用限制，重置时间 ${resetAt}`
+      })
+      await upstreamErrorHelper.clearTempUnavailable(account.id, 'openai-responses').catch(() => {})
+    }
+
+    if (sessionHash) {
+      await unifiedOpenAIScheduler._deleteSessionMapping(sessionHash).catch(() => {})
+    }
+
+    return { resetAt, resetsInSeconds }
   }
 
   _isQuotaExhausted429Error(errorData) {
@@ -1811,30 +1898,11 @@ class OpenAIResponsesRelayService {
 
     const isDailyQuotaExceeded = this._isDailyQuotaExceededError(status, errorData)
     if (isDailyQuotaExceeded) {
-      const { resetAt } = this._computeNextDailyQuotaResetAt(account.quotaResetTime || '00:00')
-      logger.warn(
-        `💸 OpenAI Responses测试触发明确日额度耗尽，按配置重置时间暂停调度 for account ${account.id}, resetAt=${resetAt}`
-      )
-
-      await upstreamErrorHelper
-        .recordErrorHistory(account.id, 'openai-responses', status, 'quota_exceeded', {
-          ...historyContext,
-          resetAt
-        })
-        .catch(() => {})
-
-      if (!oaiAutoProtectionDisabled) {
-        await openaiResponsesAccountService.updateAccount(account.id, {
-          status: 'quota_exceeded',
-          schedulable: 'false',
-          quotaStoppedAt: new Date().toISOString(),
-          rateLimitedAt: '',
-          rateLimitStatus: '',
-          rateLimitResetAt: '',
-          errorMessage: `Payment Required: 已达到每日费用限制，重置时间 ${resetAt}`
-        })
-        await upstreamErrorHelper.clearTempUnavailable(account.id, 'openai-responses').catch(() => {})
-      }
+      await this._markQuotaExceededUntilReset(account, status, errorData, {
+        model,
+        path,
+        sourceLabel: '测试触发明确日额度耗尽'
+      })
       return
     }
 
@@ -1886,9 +1954,12 @@ class OpenAIResponsesRelayService {
       }
 
       if (isQuotaExhausted) {
-        await upstreamErrorHelper
-          .recordErrorHistory(account.id, 'openai-responses', 429, 'quota_exceeded', quotaHistoryContext)
-          .catch(() => {})
+        await this._markQuotaExceededUntilReset(account, 429, finalErrorData, {
+          model,
+          path,
+          sourceLabel: '测试触发余额耗尽/日限额'
+        })
+        return
       }
 
       if (!oaiAutoProtectionDisabled) {
@@ -1898,19 +1969,14 @@ class OpenAIResponsesRelayService {
             'openai-responses',
             429,
             resetsInSeconds || upstreamErrorHelper.parseRetryAfter(headers),
-            isQuotaExhausted
-              ? { ...quotaHistoryContext, skipHistory: true }
-              : quotaHistoryContext
+            quotaHistoryContext
           )
           .catch(() => {})
-
-        if (isQuotaExhausted) {
-          this._probeQuotaExhausted429Recovery(account, model).catch((probeError) => {
-            logger.warn(
-              `Failed to probe OpenAI-Responses account availability after test 429 for ${account.id}: ${probeError.message}`
-            )
-          })
-        }
+        this._probeTemporaryRecovery(account, model, '429限流').catch((probeError) => {
+          logger.warn(
+            `Failed to probe OpenAI-Responses account availability after test 429 for ${account.id}: ${probeError.message}`
+          )
+        })
       }
       return
     }
@@ -1929,12 +1995,22 @@ class OpenAIResponsesRelayService {
     if (status === 403 && !oaiAutoProtectionDisabled) {
       logger.warn(`🚫 OpenAI Responses测试触发403临时暂停 for account ${account.id}`)
       await upstreamErrorHelper.markTempUnavailable(account.id, 'openai-responses', 403).catch(() => {})
+      this._probeTemporaryRecovery(account, model, '403错误').catch((probeError) => {
+        logger.warn(
+          `Failed to probe OpenAI-Responses account availability after test 403 for ${account.id}: ${probeError.message}`
+        )
+      })
       return
     }
 
     if (status >= 500 && !oaiAutoProtectionDisabled) {
       logger.warn(`🚫 OpenAI Responses测试触发${status}临时暂停 for account ${account.id}`)
       await upstreamErrorHelper.markTempUnavailable(account.id, 'openai-responses', status).catch(() => {})
+      this._probeTemporaryRecovery(account, model, `${status} 上游错误`).catch((probeError) => {
+        logger.warn(
+          `Failed to probe OpenAI-Responses account availability after test ${status} for ${account.id}: ${probeError.message}`
+        )
+      })
     }
   }
 
@@ -2191,21 +2267,7 @@ class OpenAIResponsesRelayService {
 
     const isQuotaExhausted = this._isQuotaExhausted429Error(errorData)
 
-    if (!isQuotaExhausted) {
-      // 使用统一调度器标记普通 429 限流状态（与普通OpenAI账号保持一致）
-      await unifiedOpenAIScheduler.markAccountRateLimited(
-        account.id,
-        'openai-responses',
-        sessionHash,
-        resetsInSeconds
-      )
-    } else {
-      logger.warn(
-        `⏸️ OpenAI-Responses account ${account.id} hit quota-like 429, skip rateLimited status and use temp pause only`
-      )
-    }
-
-    logger.warn('OpenAI-Responses account rate limited', {
+    logger.warn('OpenAI-Responses account 429 detected', {
       accountId: account.id,
       accountName: account.name,
       isQuotaExhausted,
