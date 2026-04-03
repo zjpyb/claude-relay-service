@@ -299,6 +299,13 @@ class OpenAIResponsesRelayService {
             sessionHash,
             sourceLabel: '上游明确返回余额耗尽/日限额'
           })
+          this._probeQuotaExhausted429Recovery(fullAccount || account, req.body?.model).catch(
+            (probeError) => {
+              logger.warn(
+                `Failed to probe OpenAI-Responses account availability after quota-like 429 for ${account.id}: ${probeError.message}`
+              )
+            }
+          )
 
           const retryCount = Number(req._openaiResponses429RetryCount || 0)
           if (retryCount < 3) {
@@ -1380,6 +1387,11 @@ class OpenAIResponsesRelayService {
             sessionHash,
             sourceLabel: '流式响应中明确返回余额耗尽/日限额'
           })
+          this._probeQuotaExhausted429Recovery(account, req.body?.model).catch((probeError) => {
+            logger.warn(
+              `Failed to probe OpenAI-Responses stream account availability after quota-like 429 for ${account.id}: ${probeError.message}`
+            )
+          })
 
           logger.warn(`🚫 Processing quota-like 429 for OpenAI-Responses account ${account.id} from stream`)
         } else {
@@ -1958,6 +1970,11 @@ class OpenAIResponsesRelayService {
           model,
           path,
           sourceLabel: '测试触发余额耗尽/日限额'
+        })
+        this._probeQuotaExhausted429Recovery(account, model).catch((probeError) => {
+          logger.warn(
+            `Failed to probe OpenAI-Responses account availability after test quota-like 429 for ${account.id}: ${probeError.message}`
+          )
         })
         return
       }
