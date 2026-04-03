@@ -330,7 +330,7 @@ class OpenAIResponsesRelayService {
         if (retryCount < 3) {
           try {
             req._openaiResponses429RetryCount = retryCount + 1
-            const retried = await this._retry429Request(
+            const retried = await this._retryUnavailableRequest(
               req,
               res,
               account,
@@ -339,6 +339,7 @@ class OpenAIResponsesRelayService {
               handleClientDisconnect,
               releaseConcurrency,
               {
+                reasonLabel: '429',
                 isQuotaExhausted,
                 retryCount: req._openaiResponses429RetryCount
               }
@@ -461,6 +462,34 @@ class OpenAIResponsesRelayService {
               'Failed to mark OpenAI-Responses account daily quota exceeded after upstream quota error:',
               markError
             )
+          }
+
+          const retryCount = Number(req._openaiResponses429RetryCount || 0)
+          if (retryCount < 3) {
+            try {
+              req._openaiResponses429RetryCount = retryCount + 1
+              const retried = await this._retryUnavailableRequest(
+                req,
+                res,
+                account,
+                apiKeyData,
+                sessionHash,
+                handleClientDisconnect,
+                releaseConcurrency,
+                {
+                  reasonLabel: `${response.status} 配额型错误`,
+                  isQuotaExhausted: true,
+                  retryCount: req._openaiResponses429RetryCount
+                }
+              )
+              if (retried) {
+                return res
+              }
+            } catch (retryError) {
+              logger.warn(
+                `Failed to retry OpenAI-Responses request after quota-like ${response.status} for ${account.id}: ${retryError.message}`
+              )
+            }
           }
 
           req.removeListener('close', handleClientDisconnect)
@@ -781,6 +810,34 @@ class OpenAIResponsesRelayService {
               'Failed to mark OpenAI-Responses account daily quota exceeded after upstream quota error in catch handler:',
               markError
             )
+          }
+
+          const retryCount = Number(req._openaiResponses429RetryCount || 0)
+          if (retryCount < 3) {
+            try {
+              req._openaiResponses429RetryCount = retryCount + 1
+              const retried = await this._retryUnavailableRequest(
+                req,
+                res,
+                account,
+                apiKeyData,
+                sessionHash,
+                handleClientDisconnect,
+                releaseConcurrency,
+                {
+                  reasonLabel: `${status} 配额型错误`,
+                  isQuotaExhausted: true,
+                  retryCount: req._openaiResponses429RetryCount
+                }
+              )
+              if (retried) {
+                return res
+              }
+            } catch (retryError) {
+              logger.warn(
+                `Failed to retry OpenAI-Responses request after quota-like ${status} in catch handler for ${account.id}: ${retryError.message}`
+              )
+            }
           }
 
           return res.status(402).json(this._buildDailyQuotaExceededPayload(errorData, resetAt))
@@ -1670,7 +1727,7 @@ class OpenAIResponsesRelayService {
     }
   }
 
-  async _retry429Request(
+  async _retryUnavailableRequest(
     req,
     res,
     currentAccount,
@@ -1680,7 +1737,7 @@ class OpenAIResponsesRelayService {
     releaseConcurrency,
     options = {}
   ) {
-    const { isQuotaExhausted = false, retryCount = 1 } = options
+    const { reasonLabel = '429', isQuotaExhausted = false, retryCount = 1 } = options
     const requestedModel = req.body?.model || null
     const result = await unifiedOpenAIScheduler.selectAccountForApiKey(
       apiKeyData,
@@ -1691,7 +1748,7 @@ class OpenAIResponsesRelayService {
 
     if (!result?.accountId || result.accountType !== 'openai-responses') {
       logger.info(
-        `🧪 429 后未找到可立即重试的 OpenAI-Responses 账户，保留原始429响应 for account ${currentAccount.id}`
+        `🧪 ${reasonLabel} 后未找到可立即重试的 OpenAI-Responses 账户，保留原始响应 for account ${currentAccount.id}`
       )
       return null
     }
@@ -1699,13 +1756,13 @@ class OpenAIResponsesRelayService {
     const retryAccount = await openaiResponsesAccountService.getAccount(result.accountId)
     if (!retryAccount?.apiKey) {
       logger.warn(
-        `🧪 429 后选中的重试账户 ${result.accountId} 缺少可用 apiKey，跳过立即重试`
+        `🧪 ${reasonLabel} 后选中的重试账户 ${result.accountId} 缺少可用 apiKey，跳过立即重试`
       )
       return null
     }
 
     logger.warn(
-      `🔁 OpenAI-Responses账户 ${currentAccount.id} 命中${isQuotaExhausted ? '配额型' : '普通'}429，第 ${retryCount} 次立即重试到账户 ${retryAccount.id}`
+      `🔁 OpenAI-Responses账户 ${currentAccount.id} 命中${reasonLabel}，第 ${retryCount} 次立即重试到账户 ${retryAccount.id}`
     )
 
     req.removeListener('close', handleClientDisconnect)
@@ -1713,6 +1770,9 @@ class OpenAIResponsesRelayService {
     await releaseConcurrency().catch(() => {})
 
     await this.handleRequest(req, res, retryAccount, apiKeyData)
+    logger.info(
+      `✅ OpenAI-Responses账户 ${currentAccount.id} 命中的${reasonLabel}已由重试账户 ${retryAccount.id} 接管响应`
+    )
     return true
   }
 
