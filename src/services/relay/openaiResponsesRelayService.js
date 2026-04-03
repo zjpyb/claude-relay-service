@@ -326,25 +326,29 @@ class OpenAIResponsesRelayService {
           }
         }
 
-        const quotaRetryCount = Number(req._openaiResponsesQuotaRetryCount || 0)
-        if (isQuotaExhausted && !oaiAutoProtectionDisabled && quotaRetryCount < 1) {
+        const retryCount = Number(req._openaiResponses429RetryCount || 0)
+        if (retryCount < 3) {
           try {
-            req._openaiResponsesQuotaRetryCount = quotaRetryCount + 1
-            const retried = await this._retryQuotaExhausted429Request(
+            req._openaiResponses429RetryCount = retryCount + 1
+            const retried = await this._retry429Request(
               req,
               res,
               account,
               apiKeyData,
               sessionHash,
               handleClientDisconnect,
-              releaseConcurrency
+              releaseConcurrency,
+              {
+                isQuotaExhausted,
+                retryCount: req._openaiResponses429RetryCount
+              }
             )
             if (retried) {
               return retried
             }
           } catch (retryError) {
             logger.warn(
-              `Failed to retry OpenAI-Responses request after quota-like 429 for ${account.id}: ${retryError.message}`
+              `Failed to retry OpenAI-Responses request after 429 for ${account.id}: ${retryError.message}`
             )
           }
         }
@@ -1666,44 +1670,42 @@ class OpenAIResponsesRelayService {
     }
   }
 
-  async _retryQuotaExhausted429Request(
+  async _retry429Request(
     req,
     res,
     currentAccount,
     apiKeyData,
     sessionHash,
     handleClientDisconnect,
-    releaseConcurrency
+    releaseConcurrency,
+    options = {}
   ) {
+    const { isQuotaExhausted = false, retryCount = 1 } = options
     const requestedModel = req.body?.model || null
     const result = await unifiedOpenAIScheduler.selectAccountForApiKey(
       apiKeyData,
       sessionHash,
-      requestedModel
+      requestedModel,
+      [currentAccount.id]
     )
 
     if (!result?.accountId || result.accountType !== 'openai-responses') {
       logger.info(
-        `🧪 配额耗尽类429后未找到可立即重试的 OpenAI-Responses 账户，保留原始429响应 for account ${currentAccount.id}`
+        `🧪 429 后未找到可立即重试的 OpenAI-Responses 账户，保留原始429响应 for account ${currentAccount.id}`
       )
-      return null
-    }
-
-    if (result.accountId === currentAccount.id) {
-      logger.info(`🧪 配额耗尽类429后调度仍返回原账户 ${currentAccount.id}，跳过本次立即重试`)
       return null
     }
 
     const retryAccount = await openaiResponsesAccountService.getAccount(result.accountId)
     if (!retryAccount?.apiKey) {
       logger.warn(
-        `🧪 配额耗尽类429后选中的重试账户 ${result.accountId} 缺少可用 apiKey，跳过立即重试`
+        `🧪 429 后选中的重试账户 ${result.accountId} 缺少可用 apiKey，跳过立即重试`
       )
       return null
     }
 
     logger.warn(
-      `🔁 OpenAI-Responses账户 ${currentAccount.id} 命中配额耗尽类429，已临时暂停并立即重试到账户 ${retryAccount.id}`
+      `🔁 OpenAI-Responses账户 ${currentAccount.id} 命中${isQuotaExhausted ? '配额型' : '普通'}429，第 ${retryCount} 次立即重试到账户 ${retryAccount.id}`
     )
 
     req.removeListener('close', handleClientDisconnect)
