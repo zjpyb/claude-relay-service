@@ -344,7 +344,7 @@ class OpenAIResponsesRelayService {
               }
             )
             if (retried) {
-              return retried
+              return res
             }
           } catch (retryError) {
             logger.warn(
@@ -1712,7 +1712,8 @@ class OpenAIResponsesRelayService {
     res.removeListener('close', handleClientDisconnect)
     await releaseConcurrency().catch(() => {})
 
-    return this.handleRequest(req, res, retryAccount, apiKeyData)
+    await this.handleRequest(req, res, retryAccount, apiKeyData)
+    return true
   }
 
   async _probeQuotaExhausted429Recovery(account, requestedModel) {
