@@ -4521,7 +4521,7 @@ const ACCOUNT_TEST_CONFIG_TTL = 86400 * 365 // 测试配置保留1年（用户�
  * @param {string} testResult.timestamp - 测试时间戳
  */
 const getDefaultAccountTestModel = (platform) => {
-  if (platform === 'openai-responses') {
+  if (platform === 'openai-responses' || platform === 'openai') {
     return 'gpt-5.4'
   }
   return 'claude-sonnet-4-5-20250929'

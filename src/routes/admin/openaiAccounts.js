@@ -14,6 +14,7 @@ const { authenticateAdmin } = require('../../middleware/auth')
 const logger = require('../../utils/logger')
 const ProxyHelper = require('../../utils/proxyHelper')
 const webhookNotifier = require('../../utils/webhookNotifier')
+const accountTestSchedulerService = require('../../services/accountTestSchedulerService')
 const { formatAccountExpiry, mapExpiryField } = require('./utils')
 
 const router = express.Router()
@@ -784,6 +785,139 @@ router.post('/:accountId/reset-status', authenticateAdmin, async (req, res) => {
   } catch (error) {
     logger.error('❌ Failed to reset OpenAI account status:', error)
     return res.status(500).json({ error: 'Failed to reset status', message: error.message })
+  }
+})
+
+// 获取账户测试历史
+router.get('/:accountId/test-history', authenticateAdmin, async (req, res) => {
+  const { accountId } = req.params
+
+  try {
+    const history = await redis.getAccountTestHistory(accountId, 'openai')
+    return res.json({
+      success: true,
+      data: {
+        accountId,
+        platform: 'openai',
+        history
+      }
+    })
+  } catch (error) {
+    logger.error(`❌ Failed to get test history for OpenAI account ${accountId}:`, error)
+    return res.status(500).json({
+      error: 'Failed to get test history',
+      message: error.message
+    })
+  }
+})
+
+// 获取账户定时测试配置
+router.get('/:accountId/test-config', authenticateAdmin, async (req, res) => {
+  const { accountId } = req.params
+
+  try {
+    const testConfig = await redis.getAccountTestConfig(accountId, 'openai')
+    return res.json({
+      success: true,
+      data: {
+        accountId,
+        platform: 'openai',
+        config: testConfig || {
+          enabled: false,
+          cronExpression: '0 8 * * *',
+          model: 'gpt-5.4'
+        }
+      }
+    })
+  } catch (error) {
+    logger.error(`❌ Failed to get test config for OpenAI account ${accountId}:`, error)
+    return res.status(500).json({
+      error: 'Failed to get test config',
+      message: error.message
+    })
+  }
+})
+
+// 设置账户定时测试配置
+router.put('/:accountId/test-config', authenticateAdmin, async (req, res) => {
+  const { accountId } = req.params
+  const { enabled, cronExpression, model } = req.body
+
+  try {
+    if (typeof enabled !== 'boolean') {
+      return res.status(400).json({
+        error: 'Invalid parameter',
+        message: 'enabled must be a boolean'
+      })
+    }
+
+    if (!cronExpression || typeof cronExpression !== 'string') {
+      return res.status(400).json({
+        error: 'Invalid parameter',
+        message: 'cronExpression is required and must be a string'
+      })
+    }
+
+    const MAX_CRON_LENGTH = 100
+    if (cronExpression.length > MAX_CRON_LENGTH) {
+      return res.status(400).json({
+        error: 'Invalid parameter',
+        message: `cronExpression too long (max ${MAX_CRON_LENGTH} characters)`
+      })
+    }
+
+    if (!accountTestSchedulerService.validateCronExpression(cronExpression)) {
+      return res.status(400).json({
+        error: 'Invalid parameter',
+        message: `Invalid cron expression: ${cronExpression}. Format: "minute hour day month weekday" (e.g., "0 8 * * *" for daily at 8:00)`
+      })
+    }
+
+    const testModel = model || 'gpt-5.4'
+    if (typeof testModel !== 'string' || testModel.length > 256) {
+      return res.status(400).json({
+        error: 'Invalid parameter',
+        message: 'model must be a valid string (max 256 characters)'
+      })
+    }
+
+    const account = await openaiAccountService.getAccount(accountId)
+    if (!account) {
+      return res.status(404).json({
+        error: 'Account not found',
+        message: `OpenAI account ${accountId} not found`
+      })
+    }
+
+    await redis.saveAccountTestConfig(accountId, 'openai', {
+      enabled,
+      cronExpression,
+      model: testModel
+    })
+
+    logger.success(
+      `📝 Updated test config for OpenAI account ${accountId}: enabled=${enabled}, cronExpression=${cronExpression}, model=${testModel}`
+    )
+
+    return res.json({
+      success: true,
+      message: 'Test config updated successfully',
+      data: {
+        accountId,
+        platform: 'openai',
+        config: {
+          enabled,
+          cronExpression,
+          model: testModel
+        }
+      }
+    })
+  } catch (error) {
+    logger.error(`❌ Failed to update test config for OpenAI account ${accountId}:`, error)
+    return res.status(500).json({
+      error: 'Failed to update test config',
+      message: error.message
+    })
   }
 })
 

@@ -201,7 +201,7 @@
 </template>
 
 <script setup>
-import { ref, watch, onMounted } from 'vue'
+import { ref, watch } from 'vue'
 import { APP_CONFIG } from '@/utils/tools'
 import { showToast } from '@/utils/tools'
 import { getModelsApi } from '@/utils/http_apis'
@@ -236,6 +236,11 @@ const platformConfigMap = {
       `${APP_CONFIG.apiPrefix}/admin/claude-accounts/${accountId}/test-config`,
     defaultModel: 'claude-sonnet-4-5-20250929'
   },
+  openai: {
+    endpointBuilder: (accountId) =>
+      `${APP_CONFIG.apiPrefix}/admin/openai-accounts/${accountId}/test-config`,
+    defaultModel: 'gpt-5.4'
+  },
   'openai-responses': {
     endpointBuilder: (accountId) =>
       `${APP_CONFIG.apiPrefix}/admin/openai-responses-accounts/${accountId}/test-config`,
@@ -257,14 +262,33 @@ const cronPresets = [
 const modelOptions = ref([])
 
 const loadModels = async () => {
+  const platform = props.account?.platform
+  if (!platform) {
+    modelOptions.value = []
+    return
+  }
+
   const result = await getModelsApi()
   if (result.success && result.data) {
-    const platform = props.account?.platform
-    modelOptions.value = result.data.platforms?.[platform] || result.data.claude || []
+    const platformModels = result.data.platforms?.[platform]
+    if (Array.isArray(platformModels) && platformModels.length > 0) {
+      modelOptions.value = platformModels
+      return
+    }
+
+    if (platform === 'openai' || platform === 'openai-responses') {
+      modelOptions.value = result.data.openai || []
+      return
+    }
+
+    if (platform === 'claude') {
+      modelOptions.value = result.data.claude || []
+      return
+    }
+
+    modelOptions.value = result.data.claude || []
   }
 }
-
-onMounted(loadModels)
 
 // 格式化时间戳
 function formatTimestamp(timestamp) {
@@ -396,10 +420,11 @@ function handleClose() {
 // 监听 show 变化，加载配置
 watch(
   () => props.show,
-  (newVal) => {
+  async (newVal) => {
     if (newVal) {
       config.value = createDefaultConfig(props.account)
       testHistory.value = []
+      await loadModels()
       loadConfig()
     }
   }

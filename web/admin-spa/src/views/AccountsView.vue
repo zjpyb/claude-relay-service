@@ -2772,7 +2772,7 @@ const canTestAccount = (account) => {
   return !!account && supportedTestPlatforms.includes(account.platform)
 }
 
-const supportedScheduledTestPlatforms = ['claude', 'openai-responses']
+const supportedScheduledTestPlatforms = ['claude', 'openai', 'openai-responses']
 
 const canScheduleTestAccount = (account) => {
   return !!account && supportedScheduledTestPlatforms.includes(account.platform)
