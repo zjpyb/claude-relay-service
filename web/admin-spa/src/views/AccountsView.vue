@@ -2308,6 +2308,7 @@ const accounts = ref([])
 const accountsLoading = ref(false)
 const refreshingBalances = ref(false)
 const tempUnavailableNowTs = ref(Date.now())
+const lastAutoRecoveryReloadTs = ref(0)
 const accountsSortBy = ref('name')
 const accountsSortOrder = ref('asc')
 const apiKeys = ref([]) // 保留用于其他功能（如删除账户时显示绑定信息）
@@ -3801,6 +3802,9 @@ const formatTempUnavailableTime = (seconds) => {
   return `${secs}s`
 }
 
+const SYSTEM_TIMEZONE_OFFSET = 8
+const AUTO_RECOVERY_RELOAD_COOLDOWN_MS = 5000
+
 const toPositiveInteger = (value) => {
   const parsed = Number(value)
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 0
@@ -3898,6 +3902,119 @@ const getTempUnavailableTooltipContent = (tempUnavailable) => {
   }
 
   return details.join('，')
+}
+
+const getAccountRateLimitRecoveryAt = (account) => {
+  if (!account) return ''
+
+  const rateLimitStatus = account.rateLimitStatus
+  if (rateLimitStatus && typeof rateLimitStatus === 'object' && rateLimitStatus.rateLimitResetAt) {
+    const resetAt = new Date(rateLimitStatus.rateLimitResetAt)
+    if (!Number.isNaN(resetAt.getTime())) {
+      return rateLimitStatus.rateLimitResetAt
+    }
+  }
+
+  if (account.rateLimitResetAt) {
+    const resetAt = new Date(account.rateLimitResetAt)
+    if (!Number.isNaN(resetAt.getTime())) {
+      return account.rateLimitResetAt
+    }
+  }
+
+  if (account.rateLimitUntil) {
+    const resetAt = new Date(account.rateLimitUntil)
+    if (!Number.isNaN(resetAt.getTime())) {
+      return account.rateLimitUntil
+    }
+  }
+
+  if (account.rateLimitedAt) {
+    const limitedAt = new Date(account.rateLimitedAt)
+    const rateLimitDurationMinutes = Number(account.rateLimitDuration || 0)
+    if (
+      !Number.isNaN(limitedAt.getTime()) &&
+      Number.isFinite(rateLimitDurationMinutes) &&
+      rateLimitDurationMinutes > 0
+    ) {
+      return new Date(limitedAt.getTime() + rateLimitDurationMinutes * 60 * 1000).toISOString()
+    }
+  }
+
+  return ''
+}
+
+const getAccountQuotaRecoveryAt = (account) => {
+  if (!account?.quotaStoppedAt) return ''
+
+  const quotaStoppedAt = new Date(account.quotaStoppedAt)
+  if (Number.isNaN(quotaStoppedAt.getTime())) {
+    return ''
+  }
+
+  const [rawHour, rawMinute] = String(account.quotaResetTime || '00:00').split(':')
+  const resetHour = Number.parseInt(rawHour, 10)
+  const resetMinute = Number.parseInt(rawMinute, 10)
+  const normalizedHour = Number.isFinite(resetHour) ? resetHour : 0
+  const normalizedMinute = Number.isFinite(resetMinute) ? resetMinute : 0
+
+  const offsetMs = SYSTEM_TIMEZONE_OFFSET * 60 * 60 * 1000
+  const tzStoppedAt = new Date(quotaStoppedAt.getTime() + offsetMs)
+
+  let resetAtMs =
+    Date.UTC(
+      tzStoppedAt.getUTCFullYear(),
+      tzStoppedAt.getUTCMonth(),
+      tzStoppedAt.getUTCDate(),
+      normalizedHour,
+      normalizedMinute,
+      0,
+      0
+    ) - offsetMs
+
+  if (resetAtMs <= quotaStoppedAt.getTime()) {
+    resetAtMs += 24 * 60 * 60 * 1000
+  }
+
+  return new Date(resetAtMs).toISOString()
+}
+
+const getAccountAutoRecoveryAt = (account) => {
+  if (!account) return ''
+
+  const recoveryCandidates = [
+    getTempUnavailableRecoveryAt(account.tempUnavailable),
+    getAccountRateLimitRecoveryAt(account),
+    getAccountQuotaRecoveryAt(account)
+  ]
+    .map((value) => {
+      if (!value) return null
+      const timestamp = new Date(value).getTime()
+      return Number.isNaN(timestamp) ? null : timestamp
+    })
+    .filter((value) => Number.isFinite(value))
+
+  if (recoveryCandidates.length === 0) {
+    return ''
+  }
+
+  return new Date(Math.min(...recoveryCandidates)).toISOString()
+}
+
+const shouldAutoReloadRecoveredAccounts = (nowTs) => {
+  if (accountsLoading.value || !Array.isArray(accounts.value) || accounts.value.length === 0) {
+    return false
+  }
+
+  return accounts.value.some((account) => {
+    const recoveryAt = getAccountAutoRecoveryAt(account)
+    if (!recoveryAt) {
+      return false
+    }
+
+    const recoveryAtTs = new Date(recoveryAt).getTime()
+    return !Number.isNaN(recoveryAtTs) && recoveryAtTs <= nowTs
+  })
 }
 
 // 检查账户是否被限流
@@ -4618,7 +4735,7 @@ const getRoutingBlockReasons = (account) => {
     reasons.push(account.errorMessage || '账号状态异常')
   }
 
-  if (account.status === 'quota_exceeded') {
+  if (account.status === 'quota_exceeded' || account.status === 'quotaExceeded') {
     reasons.push('余额/配额不足')
   }
 
@@ -5270,7 +5387,16 @@ onMounted(() => {
 
   // 让临时不可用剩余时间在页面停留时也可见地递减
   tempUnavailableCountdownTimer = setInterval(() => {
-    tempUnavailableNowTs.value = Date.now()
+    const nowTs = Date.now()
+    tempUnavailableNowTs.value = nowTs
+
+    if (
+      nowTs - lastAutoRecoveryReloadTs.value >= AUTO_RECOVERY_RELOAD_COOLDOWN_MS &&
+      shouldAutoReloadRecoveredAccounts(nowTs)
+    ) {
+      lastAutoRecoveryReloadTs.value = nowTs
+      loadAccounts(true)
+    }
   }, 1000)
 
   // 设置ResizeObserver监听表格容器大小变化

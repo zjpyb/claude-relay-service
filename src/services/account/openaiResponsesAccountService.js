@@ -656,17 +656,39 @@ class OpenAIResponsesAccountService {
     return new Date(resetAtMs)
   }
 
+  _isQuotaExceededStatus(account) {
+    return account?.status === 'quota_exceeded' || account?.status === 'quotaExceeded'
+  }
+
   async _checkAndClearQuotaExceeded(account) {
-    if (!account?.quotaStoppedAt) {
+    if (!account) {
       return false
     }
 
-    const quotaStoppedAt = new Date(account.quotaStoppedAt)
-    if (Number.isNaN(quotaStoppedAt.getTime())) {
+    let nextResetAt = null
+
+    if (account.quotaStoppedAt) {
+      const quotaStoppedAt = new Date(account.quotaStoppedAt)
+      if (!Number.isNaN(quotaStoppedAt.getTime())) {
+        nextResetAt = this._computeNextDailyQuotaResetAt(
+          account.quotaResetTime || '00:00',
+          quotaStoppedAt
+        )
+      }
+    }
+
+    // 兼容历史遗留数据：早期日额度耗尽曾只写 status=quotaExceeded + rateLimitResetAt。
+    if (!nextResetAt && this._isQuotaExceededStatus(account) && account.rateLimitResetAt) {
+      const legacyResetAt = new Date(account.rateLimitResetAt)
+      if (!Number.isNaN(legacyResetAt.getTime())) {
+        nextResetAt = legacyResetAt
+      }
+    }
+
+    if (!nextResetAt) {
       return false
     }
 
-    const nextResetAt = this._computeNextDailyQuotaResetAt(account.quotaResetTime || '00:00', quotaStoppedAt)
     if (new Date() < nextResetAt) {
       return false
     }
@@ -676,6 +698,9 @@ class OpenAIResponsesAccountService {
       dailyUsage: '0',
       lastResetDate: today,
       quotaStoppedAt: '',
+      rateLimitedAt: '',
+      rateLimitStatus: '',
+      rateLimitResetAt: '',
       status: 'active',
       schedulable: 'true',
       errorMessage: ''

@@ -112,34 +112,44 @@ async function readOpenAIResponsesTestStream(stream) {
 router.get('/openai-responses-accounts', authenticateAdmin, async (req, res) => {
   try {
     const { platform, groupId } = req.query
-    let accounts = await openaiResponsesAccountService.getAllAccounts(true)
+    const filterAccounts = async (sourceAccounts) => {
+      let filteredAccounts = sourceAccounts
 
-    // 根据查询参数进行筛选
-    if (platform && platform !== 'openai-responses') {
-      accounts = []
-    }
-
-    // 根据分组ID筛选
-    if (groupId) {
-      const group = await accountGroupService.getGroup(groupId)
-      if (group && group.platform === 'openai') {
-        const groupMembers = await accountGroupService.getGroupMembers(groupId)
-        accounts = accounts.filter((account) => groupMembers.includes(account.id))
-      } else {
-        accounts = []
+      // 根据查询参数进行筛选
+      if (platform && platform !== 'openai-responses') {
+        return []
       }
+
+      // 根据分组ID筛选
+      if (groupId) {
+        const group = await accountGroupService.getGroup(groupId)
+        if (group && group.platform === 'openai') {
+          const groupMembers = await accountGroupService.getGroupMembers(groupId)
+          filteredAccounts = filteredAccounts.filter((account) => groupMembers.includes(account.id))
+        } else {
+          return []
+        }
+      }
+
+      return filteredAccounts
     }
+
+    let accounts = await filterAccounts(await openaiResponsesAccountService.getAllAccounts(true))
 
     const accountIds = accounts.map((a) => a.id)
 
     // 并行获取：轻量 API Keys + 分组信息 + daily cost + 清理限流状态
-    const [allApiKeys, allGroupInfosMap, dailyCostMap] = await Promise.all([
+    const [allApiKeys, allGroupInfosMap, dailyCostMap, clearedStates] = await Promise.all([
       apiKeyService.getAllApiKeysLite(),
       accountGroupService.batchGetAccountGroupsByIndex(accountIds, 'openai'),
       redis.batchGetAccountDailyCost(accountIds),
-      // 批量清理限流状态
+      // 批量清理异常状态；如果本次请求触发了恢复，需要重新读取账户快照
       Promise.all(accountIds.map((id) => openaiResponsesAccountService.checkAndClearRateLimit(id)))
     ])
+
+    if (clearedStates.some(Boolean)) {
+      accounts = await filterAccounts(await openaiResponsesAccountService.getAllAccounts(true))
+    }
 
     // 单次遍历构建绑定数映射（只算直连，不算 group）
     const bindingCountMap = new Map()
