@@ -734,6 +734,7 @@
                     </span>
                     <span
                       v-if="
+                        account.status === 'rateLimited' ||
                         (account.rateLimitStatus && account.rateLimitStatus.isRateLimited) ||
                         account.rateLimitStatus === 'limited'
                       "
@@ -4066,6 +4067,10 @@ const shouldAutoReloadRecoveredAccounts = (nowTs) => {
 const isAccountRateLimited = (account) => {
   if (!account) return false
 
+  if (account.status === 'rateLimited') {
+    return true
+  }
+
   // 检查 rateLimitStatus
   if (account.rateLimitStatus) {
     if (typeof account.rateLimitStatus === 'string' && account.rateLimitStatus === 'limited') {
@@ -4877,6 +4882,7 @@ const getAccountStatusText = (account) => {
   // 检查是否限流
   if (
     account.isRateLimited ||
+    account.status === 'rateLimited' ||
     account.status === 'rate_limited' ||
     (account.rateLimitStatus && account.rateLimitStatus.isRateLimited) ||
     account.rateLimitStatus === 'limited'
@@ -4904,6 +4910,7 @@ const getAccountStatusClass = (account) => {
   }
   if (
     account.isRateLimited ||
+    account.status === 'rateLimited' ||
     account.status === 'rate_limited' ||
     (account.rateLimitStatus && account.rateLimitStatus.isRateLimited) ||
     account.rateLimitStatus === 'limited'
