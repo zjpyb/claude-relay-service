@@ -22,6 +22,90 @@ const router = express.Router()
 const DEFAULT_OPENAI_TEST_USER_AGENT =
   'codex-tui/0.118.0 (Mac OS 12.6.9; x86_64) Apple_Terminal (codex-tui; 0.118.0)'
 
+function extractResponseOutputText(responseData) {
+  let responseText = ''
+  const output = responseData?.output
+  if (!Array.isArray(output)) {
+    return responseText
+  }
+
+  for (const item of output) {
+    if (item?.type === 'message' && Array.isArray(item.content)) {
+      for (const block of item.content) {
+        if (block?.type === 'output_text' && block.text) {
+          responseText += block.text
+        }
+      }
+    }
+  }
+
+  return responseText
+}
+
+async function readOpenAIResponsesTestStream(stream) {
+  if (!stream?.on) {
+    return { rawBody: '', responseText: '', errorData: null }
+  }
+
+  const chunks = []
+  await new Promise((resolve, reject) => {
+    stream.on('data', (chunk) => {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)))
+    })
+    stream.on('end', resolve)
+    stream.on('error', reject)
+  })
+
+  const rawBody = Buffer.concat(chunks).toString('utf8')
+  if (!rawBody) {
+    return { rawBody: '', responseText: '', errorData: null }
+  }
+
+  // 兼容非流式 JSON 返回
+  try {
+    const json = JSON.parse(rawBody)
+    return {
+      rawBody,
+      responseText: extractResponseOutputText(json),
+      errorData: json
+    }
+  } catch {
+    // ignore
+  }
+
+  let responseText = ''
+  let errorData = null
+  const lines = rawBody.split('\n')
+  for (const line of lines) {
+    if (!line.startsWith('data:')) {
+      continue
+    }
+    const jsonStr = line.slice(5).trim()
+    if (!jsonStr || jsonStr === '[DONE]') {
+      continue
+    }
+
+    try {
+      const eventData = JSON.parse(jsonStr)
+      if (!errorData && eventData?.error) {
+        errorData = eventData
+      }
+
+      if (eventData?.type === 'response.output_text.delta' && typeof eventData.delta === 'string') {
+        responseText += eventData.delta
+      }
+
+      if (eventData?.type === 'response.completed' && eventData.response && !responseText) {
+        responseText = extractResponseOutputText(eventData.response)
+      }
+    } catch {
+      // ignore malformed SSE event
+    }
+  }
+
+  return { rawBody, responseText, errorData }
+}
+
 // ==================== OpenAI-Responses 账户管理 API ====================
 
 // 获取所有 OpenAI-Responses 账户
@@ -676,7 +760,7 @@ router.post('/openai-responses-accounts/:accountId/test', authenticateAdmin, asy
       endpointPath = `/v1${endpointPath}`
     }
     const apiUrl = `${baseUrl}${endpointPath}`
-    const payload = createOpenAITestPayload(model, { stream: false })
+    const payload = createOpenAITestPayload(model, { stream: true })
 
     const requestConfig = {
       headers: {
@@ -687,7 +771,9 @@ router.post('/openai-responses-accounts/:accountId/test', authenticateAdmin, asy
           req.headers['user-agent'] ||
           DEFAULT_OPENAI_TEST_USER_AGENT
       },
-      timeout: 30000
+      timeout: 30000,
+      responseType: 'stream',
+      validateStatus: () => true
     }
 
     // 配置代理
@@ -701,20 +787,37 @@ router.post('/openai-responses-accounts/:accountId/test', authenticateAdmin, asy
 
     const response = await axios.post(apiUrl, payload, requestConfig)
     const latency = Date.now() - startTime
+    const { rawBody, responseText, errorData } = await readOpenAIResponsesTestStream(response.data)
 
-    // 提取响应文本（Responses API 格式）
-    let responseText = ''
-    const output = response.data?.output
-    if (Array.isArray(output)) {
-      for (const item of output) {
-        if (item.type === 'message' && Array.isArray(item.content)) {
-          for (const block of item.content) {
-            if (block.type === 'output_text' && block.text) {
-              responseText += block.text
-            }
-          }
-        }
+    if (response.status < 200 || response.status >= 400) {
+      await openaiResponsesRelayService
+        .applyTestFailureProtection(account, response.status, errorData || rawBody, {
+          model,
+          path: req.originalUrl,
+          headers: response.headers
+        })
+        .catch((protectionError) => {
+          logger.warn(
+            `Failed to apply OpenAI-Responses auto protection after admin test failure for ${accountId}:`,
+            protectionError
+          )
+        })
+
+      let errorMessage = extractErrorMessage(errorData, `API Error: ${response.status}`)
+      if (
+        errorMessage === `API Error: ${response.status}` &&
+        typeof rawBody === 'string' &&
+        rawBody.trim()
+      ) {
+        const trimmed = rawBody.trim()
+        errorMessage = trimmed.length > 300 ? trimmed.slice(0, 300) : trimmed
       }
+      return res.status(500).json({
+        success: false,
+        error: 'Test failed',
+        message: errorMessage,
+        latency
+      })
     }
 
     logger.success(
