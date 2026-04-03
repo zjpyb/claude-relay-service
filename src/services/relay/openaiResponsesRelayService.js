@@ -635,6 +635,33 @@ class OpenAIResponsesRelayService {
               markError
             )
           }
+
+          const retryCount = Number(req._openaiResponses429RetryCount || 0)
+          if (retryCount < 3) {
+            try {
+              req._openaiResponses429RetryCount = retryCount + 1
+              const retried = await this._retryUnavailableRequest(
+                req,
+                res,
+                account,
+                apiKeyData,
+                sessionHash,
+                handleClientDisconnect,
+                releaseConcurrency,
+                {
+                  reasonLabel: `${response.status} 上游错误`,
+                  retryCount: req._openaiResponses429RetryCount
+                }
+              )
+              if (retried) {
+                return res
+              }
+            } catch (retryError) {
+              logger.warn(
+                `Failed to retry OpenAI-Responses request after upstream ${response.status} for ${account.id}: ${retryError.message}`
+              )
+            }
+          }
         }
 
         // 清理监听器
@@ -911,6 +938,53 @@ class OpenAIResponsesRelayService {
               'Failed to mark OpenAI-Responses account temporarily unavailable after 403 in catch handler:',
               markError
             )
+          }
+        }
+
+        if (status >= 500 && account?.id && !isUpstreamSchedulerRateLimit) {
+          try {
+            const oaiAutoProtectionDisabled =
+              account?.disableAutoProtection === true || account?.disableAutoProtection === 'true'
+            if (!oaiAutoProtectionDisabled) {
+              await upstreamErrorHelper
+                .markTempUnavailable(account.id, 'openai-responses', status)
+                .catch(() => {})
+            }
+            if (sessionHash) {
+              await unifiedOpenAIScheduler._deleteSessionMapping(sessionHash).catch(() => {})
+            }
+          } catch (markError) {
+            logger.warn(
+              `Failed to mark OpenAI-Responses account temporarily unavailable after ${status} in catch handler:`,
+              markError
+            )
+          }
+
+          const retryCount = Number(req._openaiResponses429RetryCount || 0)
+          if (retryCount < 3) {
+            try {
+              req._openaiResponses429RetryCount = retryCount + 1
+              const retried = await this._retryUnavailableRequest(
+                req,
+                res,
+                account,
+                apiKeyData,
+                sessionHash,
+                handleClientDisconnect,
+                releaseConcurrency,
+                {
+                  reasonLabel: `${status} 上游错误`,
+                  retryCount: req._openaiResponses429RetryCount
+                }
+              )
+              if (retried) {
+                return res
+              }
+            } catch (retryError) {
+              logger.warn(
+                `Failed to retry OpenAI-Responses request after upstream ${status} in catch handler for ${account.id}: ${retryError.message}`
+              )
+            }
           }
         }
 
