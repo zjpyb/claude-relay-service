@@ -500,7 +500,7 @@ class OpenAIResponsesRelayService {
 
         if (isUpstreamSchedulerRateLimit && account?.id) {
           logger.warn(
-            `🚫 OpenAI Responses上游返回模型当前不可路由，已按限流处理 for account ${account.id}`
+            `🚫 OpenAI Responses上游返回模型当前不可路由，已临时暂停并准备切账号重试 for account ${account.id}`
           )
 
           try {
@@ -509,8 +509,7 @@ class OpenAIResponsesRelayService {
             const historyContext = {
               model: req.body?.model,
               path: req.originalUrl,
-              errorBody: errorData,
-              pauseStatus: 429
+              errorBody: errorData
             }
             await upstreamErrorHelper
               .recordErrorHistory(
@@ -522,26 +521,57 @@ class OpenAIResponsesRelayService {
               )
               .catch(() => {})
             if (!oaiAutoProtectionDisabled) {
-              await unifiedOpenAIScheduler.markAccountRateLimited(
-                account.id,
-                'openai-responses',
-                sessionHash
-              )
+              const pauseStatus = response.status === 400 ? 429 : response.status
               await upstreamErrorHelper
-                .markTempUnavailable(account.id, 'openai-responses', 429, null, {
+                .markTempUnavailable(account.id, 'openai-responses', pauseStatus, null, {
                   ...historyContext,
+                  pauseStatus,
                   skipHistory: true
                 })
                 .catch(() => {})
+              this._probeUpstreamSchedulerRecovery(fullAccount || account, req.body?.model).catch(
+                (probeError) => {
+                  logger.warn(
+                    `Failed to probe OpenAI-Responses account availability after unroutable-model error for ${account.id}: ${probeError.message}`
+                  )
+                }
+              )
             }
             if (sessionHash) {
               await unifiedOpenAIScheduler._deleteSessionMapping(sessionHash).catch(() => {})
             }
           } catch (markError) {
             logger.warn(
-              'Failed to mark OpenAI-Responses account rate limited after upstream unroutable-model error:',
+              'Failed to mark OpenAI-Responses account temporarily unavailable after upstream unroutable-model error:',
               markError
             )
+          }
+
+          const retryCount = Number(req._openaiResponses429RetryCount || 0)
+          if (retryCount < 3) {
+            try {
+              req._openaiResponses429RetryCount = retryCount + 1
+              const retried = await this._retryUnavailableRequest(
+                req,
+                res,
+                account,
+                apiKeyData,
+                sessionHash,
+                handleClientDisconnect,
+                releaseConcurrency,
+                {
+                  reasonLabel: `${response.status} 模型不可路由`,
+                  retryCount: req._openaiResponses429RetryCount
+                }
+              )
+              if (retried) {
+                return res
+              }
+            } catch (retryError) {
+              logger.warn(
+                `Failed to retry OpenAI-Responses request after unroutable-model ${response.status} for ${account.id}: ${retryError.message}`
+              )
+            }
           }
         }
 
@@ -556,6 +586,13 @@ class OpenAIResponsesRelayService {
               await upstreamErrorHelper
                 .markTempUnavailable(account.id, 'openai-responses', 401)
                 .catch(() => {})
+              this._probeUnauthorized401Recovery(fullAccount || account, req.body?.model).catch(
+                (probeError) => {
+                  logger.warn(
+                    `Failed to probe OpenAI-Responses account availability after 401 for ${account.id}: ${probeError.message}`
+                  )
+                }
+              )
             }
             if (sessionHash) {
               await unifiedOpenAIScheduler._deleteSessionMapping(sessionHash).catch(() => {})
@@ -565,6 +602,33 @@ class OpenAIResponsesRelayService {
               '❌ Failed to mark OpenAI-Responses account temporarily unavailable after 401:',
               markError
             )
+          }
+
+          const retryCount = Number(req._openaiResponses429RetryCount || 0)
+          if (retryCount < 3) {
+            try {
+              req._openaiResponses429RetryCount = retryCount + 1
+              const retried = await this._retryUnavailableRequest(
+                req,
+                res,
+                account,
+                apiKeyData,
+                sessionHash,
+                handleClientDisconnect,
+                releaseConcurrency,
+                {
+                  reasonLabel: '401 认证错误',
+                  retryCount: req._openaiResponses429RetryCount
+                }
+              )
+              if (retried) {
+                return res
+              }
+            } catch (retryError) {
+              logger.warn(
+                `Failed to retry OpenAI-Responses request after 401 for ${account?.id}: ${retryError.message}`
+              )
+            }
           }
 
           let unauthorizedResponse = errorData
@@ -763,6 +827,13 @@ class OpenAIResponsesRelayService {
               await upstreamErrorHelper
                 .markTempUnavailable(account.id, 'openai-responses', 401)
                 .catch(() => {})
+              this._probeUnauthorized401Recovery(fullAccount || account, req.body?.model).catch(
+                (probeError) => {
+                  logger.warn(
+                    `Failed to probe OpenAI-Responses account availability after 401 in catch handler for ${account.id}: ${probeError.message}`
+                  )
+                }
+              )
             }
             if (sessionHash) {
               await unifiedOpenAIScheduler._deleteSessionMapping(sessionHash).catch(() => {})
@@ -772,6 +843,33 @@ class OpenAIResponsesRelayService {
               '❌ Failed to mark OpenAI-Responses account temporarily unavailable in catch handler:',
               markError
             )
+          }
+
+          const retryCount = Number(req._openaiResponses429RetryCount || 0)
+          if (retryCount < 3) {
+            try {
+              req._openaiResponses429RetryCount = retryCount + 1
+              const retried = await this._retryUnavailableRequest(
+                req,
+                res,
+                account,
+                apiKeyData,
+                sessionHash,
+                handleClientDisconnect,
+                releaseConcurrency,
+                {
+                  reasonLabel: '401 认证错误',
+                  retryCount: req._openaiResponses429RetryCount
+                }
+              )
+              if (retried) {
+                return res
+              }
+            } catch (retryError) {
+              logger.warn(
+                `Failed to retry OpenAI-Responses request after 401 in catch handler for ${account?.id}: ${retryError.message}`
+              )
+            }
           }
 
           let unauthorizedResponse = errorData
@@ -872,7 +970,7 @@ class OpenAIResponsesRelayService {
 
         if (isUpstreamSchedulerRateLimit && account?.id) {
           logger.warn(
-            `🚫 OpenAI Responses上游返回模型当前不可路由，已按限流处理 for account ${account.id} (catch handler)`
+            `🚫 OpenAI Responses上游返回模型当前不可路由，已临时暂停并准备切账号重试 for account ${account.id} (catch handler)`
           )
 
           try {
@@ -881,8 +979,7 @@ class OpenAIResponsesRelayService {
             const historyContext = {
               model: req.body?.model,
               path: req.originalUrl,
-              errorBody: errorData,
-              pauseStatus: 429
+              errorBody: errorData
             }
             await upstreamErrorHelper
               .recordErrorHistory(
@@ -894,26 +991,57 @@ class OpenAIResponsesRelayService {
               )
               .catch(() => {})
             if (!oaiAutoProtectionDisabled) {
-              await unifiedOpenAIScheduler.markAccountRateLimited(
-                account.id,
-                'openai-responses',
-                sessionHash
-              )
+              const pauseStatus = status === 400 ? 429 : status
               await upstreamErrorHelper
-                .markTempUnavailable(account.id, 'openai-responses', 429, null, {
+                .markTempUnavailable(account.id, 'openai-responses', pauseStatus, null, {
                   ...historyContext,
+                  pauseStatus,
                   skipHistory: true
                 })
                 .catch(() => {})
+              this._probeUpstreamSchedulerRecovery(fullAccount || account, req.body?.model).catch(
+                (probeError) => {
+                  logger.warn(
+                    `Failed to probe OpenAI-Responses account availability after unroutable-model error in catch handler for ${account.id}: ${probeError.message}`
+                  )
+                }
+              )
             }
             if (sessionHash) {
               await unifiedOpenAIScheduler._deleteSessionMapping(sessionHash).catch(() => {})
             }
           } catch (markError) {
             logger.warn(
-              'Failed to mark OpenAI-Responses account rate limited after upstream unroutable-model error in catch handler:',
+              'Failed to mark OpenAI-Responses account temporarily unavailable after upstream unroutable-model error in catch handler:',
               markError
             )
+          }
+
+          const retryCount = Number(req._openaiResponses429RetryCount || 0)
+          if (retryCount < 3) {
+            try {
+              req._openaiResponses429RetryCount = retryCount + 1
+              const retried = await this._retryUnavailableRequest(
+                req,
+                res,
+                account,
+                apiKeyData,
+                sessionHash,
+                handleClientDisconnect,
+                releaseConcurrency,
+                {
+                  reasonLabel: `${status} 模型不可路由`,
+                  retryCount: req._openaiResponses429RetryCount
+                }
+              )
+              if (retried) {
+                return res
+              }
+            } catch (retryError) {
+              logger.warn(
+                `Failed to retry OpenAI-Responses request after unroutable-model ${status} in catch handler for ${account.id}: ${retryError.message}`
+              )
+            }
           }
         }
 
@@ -1712,24 +1840,28 @@ class OpenAIResponsesRelayService {
 
     const isUpstreamSchedulerRateLimit = this._isUpstreamSchedulerRateLimit(status, errorData)
     if (isUpstreamSchedulerRateLimit) {
-      logger.warn(`🚫 OpenAI Responses测试触发模型不可路由，已按限流处理 for account ${account.id}`)
+      logger.warn(`🚫 OpenAI Responses测试触发模型不可路由，已临时暂停并后台探测 for account ${account.id}`)
 
       await upstreamErrorHelper
         .recordErrorHistory(account.id, 'openai-responses', status, 'unroutable_model', {
-          ...historyContext,
-          pauseStatus: 429
+          ...historyContext
         })
         .catch(() => {})
 
       if (!oaiAutoProtectionDisabled) {
-        await unifiedOpenAIScheduler.markAccountRateLimited(account.id, 'openai-responses')
+        const pauseStatus = status === 400 ? 429 : status
         await upstreamErrorHelper
-          .markTempUnavailable(account.id, 'openai-responses', 429, null, {
+          .markTempUnavailable(account.id, 'openai-responses', pauseStatus, null, {
             ...historyContext,
-            pauseStatus: 429,
+            pauseStatus,
             skipHistory: true
           })
           .catch(() => {})
+        this._probeUpstreamSchedulerRecovery(account, model).catch((probeError) => {
+          logger.warn(
+            `Failed to probe OpenAI-Responses account availability after test unroutable-model error for ${account.id}: ${probeError.message}`
+          )
+        })
       }
       return
     }
@@ -1786,6 +1918,11 @@ class OpenAIResponsesRelayService {
     if (status === 401 && !oaiAutoProtectionDisabled) {
       logger.warn(`🚫 OpenAI Responses测试触发401临时暂停 for account ${account.id}`)
       await upstreamErrorHelper.markTempUnavailable(account.id, 'openai-responses', 401).catch(() => {})
+      this._probeUnauthorized401Recovery(account, model).catch((probeError) => {
+        logger.warn(
+          `Failed to probe OpenAI-Responses account availability after test 401 for ${account.id}: ${probeError.message}`
+        )
+      })
       return
     }
 
@@ -1850,14 +1987,14 @@ class OpenAIResponsesRelayService {
     return true
   }
 
-  async _probeQuotaExhausted429Recovery(account, requestedModel) {
+  async _probeTemporaryRecovery(account, requestedModel, reasonLabel) {
     if (!account?.id || !account?.apiKey || !account?.baseApi) {
       return false
     }
 
     if (!requestedModel || typeof requestedModel !== 'string') {
       logger.info(
-        `🧪 OpenAI-Responses账户 ${account.id} 配额耗尽类429后缺少原始请求模型，跳过后台可用性探测`
+        `🧪 OpenAI-Responses账户 ${account.id} ${reasonLabel}后缺少原始请求模型，跳过后台可用性探测`
       )
       return false
     }
@@ -1906,25 +2043,31 @@ class OpenAIResponsesRelayService {
           .clearTempUnavailable(account.id, 'openai-responses')
           .catch(() => {})
 
-        logger.warn(
-          `✅ OpenAI-Responses账户 ${account.id} 在配额耗尽类429后探测可用，已自动恢复调度状态`
-        )
+        logger.warn(`✅ OpenAI-Responses账户 ${account.id} 在${reasonLabel}后探测可用，已自动恢复调度状态`)
         return true
       }
 
-      logger.info(
-        `🧪 OpenAI-Responses账户 ${account.id} 配额耗尽类429后探测仍不可用: status=${response.status}`
-      )
+      logger.info(`🧪 OpenAI-Responses账户 ${account.id} ${reasonLabel}后探测仍不可用: status=${response.status}`)
       return false
     } catch (error) {
       const message = extractErrorMessage(error.response?.data, error.message)
-      logger.info(
-        `🧪 OpenAI-Responses账户 ${account.id} 配额耗尽类429后探测失败，保留暂停状态: ${message}`
-      )
+      logger.info(`🧪 OpenAI-Responses账户 ${account.id} ${reasonLabel}后探测失败，保留暂停状态: ${message}`)
       return false
     } finally {
       response?.data?.destroy?.()
     }
+  }
+
+  async _probeQuotaExhausted429Recovery(account, requestedModel) {
+    return this._probeTemporaryRecovery(account, requestedModel, '配额耗尽类429')
+  }
+
+  async _probeUpstreamSchedulerRecovery(account, requestedModel) {
+    return this._probeTemporaryRecovery(account, requestedModel, '模型不可路由')
+  }
+
+  async _probeUnauthorized401Recovery(account, requestedModel) {
+    return this._probeTemporaryRecovery(account, requestedModel, '401认证错误')
   }
 
   _resolve429ResetSeconds(errorData, headers) {
