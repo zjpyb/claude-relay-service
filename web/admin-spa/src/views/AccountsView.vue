@@ -2313,7 +2313,7 @@ const lastAutoRecoveryReloadTs = ref(0)
 const accountsSortBy = ref('name')
 const accountsSortOrder = ref('asc')
 const apiKeys = ref([]) // 保留用于其他功能（如删除账户时显示绑定信息）
-let attemptedAutoRecoverySignatures = new Set()
+let attemptedAutoRecoveryAtBySignature = new Map()
 const bindingCounts = ref({}) // 轻量级绑定计数，用于显示"绑定: X 个API Key"
 const accountGroups = ref([])
 const groupFilter = ref('all')
@@ -3515,8 +3515,8 @@ const loadAccounts = async (forceReload = false) => {
     const currentAutoRecoverySignatures = new Set(
       filteredAccounts.map((account) => getAccountAutoRecoverySignature(account)).filter(Boolean)
     )
-    attemptedAutoRecoverySignatures = new Set(
-      Array.from(attemptedAutoRecoverySignatures).filter((signature) =>
+    attemptedAutoRecoveryAtBySignature = new Map(
+      Array.from(attemptedAutoRecoveryAtBySignature.entries()).filter(([signature]) =>
         currentAutoRecoverySignatures.has(signature)
       )
     )
@@ -3814,6 +3814,7 @@ const formatTempUnavailableTime = (seconds) => {
 
 const SYSTEM_TIMEZONE_OFFSET = 8
 const AUTO_RECOVERY_RELOAD_COOLDOWN_MS = 5000
+const AUTO_RECOVERY_RETRY_WINDOW_MS = 60000
 
 const toPositiveInteger = (value) => {
   const parsed = Number(value)
@@ -4049,7 +4050,12 @@ const shouldAutoReloadRecoveredAccounts = (nowTs) => {
 
   return accounts.value.some((account) => {
     const recoverySignature = getAccountAutoRecoverySignature(account)
-    if (!recoverySignature || attemptedAutoRecoverySignatures.has(recoverySignature)) {
+    if (!recoverySignature) {
+      return false
+    }
+
+    const lastAttemptedAt = attemptedAutoRecoveryAtBySignature.get(recoverySignature) || 0
+    if (lastAttemptedAt > 0 && nowTs - lastAttemptedAt < AUTO_RECOVERY_RETRY_WINDOW_MS) {
       return false
     }
 
@@ -4943,6 +4949,7 @@ const getAccountStatusDotClass = (account) => {
   }
   if (
     account.isRateLimited ||
+    account.status === 'rateLimited' ||
     account.status === 'rate_limited' ||
     (account.rateLimitStatus && account.rateLimitStatus.isRateLimited) ||
     account.rateLimitStatus === 'limited'
@@ -4987,6 +4994,7 @@ const getSessionProgressBarClass = (status, account = null) => {
   const isRateLimited =
     account &&
     (account.isRateLimited ||
+      account.status === 'rateLimited' ||
       account.status === 'rate_limited' ||
       (account.rateLimitStatus && account.rateLimitStatus.isRateLimited) ||
       account.rateLimitStatus === 'limited')
@@ -5455,7 +5463,7 @@ onMounted(() => {
         const recoveryAt = getAccountAutoRecoveryAt(account)
         const recoveryAtTs = new Date(recoveryAt).getTime()
         if (!Number.isNaN(recoveryAtTs) && recoveryAtTs <= nowTs) {
-          attemptedAutoRecoverySignatures.add(recoverySignature)
+          attemptedAutoRecoveryAtBySignature.set(recoverySignature, nowTs)
         }
       })
       lastAutoRecoveryReloadTs.value = nowTs
