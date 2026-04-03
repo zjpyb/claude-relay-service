@@ -1110,6 +1110,49 @@ router.put('/claude-accounts/:accountId/test-config', authenticateAdmin, async (
   }
 })
 
+// 测试 Cron 表达式
+router.post('/claude-accounts/:accountId/test-cron', authenticateAdmin, async (req, res) => {
+  const { cronExpression } = req.body
+
+  try {
+    if (!cronExpression || typeof cronExpression !== 'string') {
+      return res.status(400).json({
+        error: 'Invalid parameter',
+        message: 'cronExpression is required and must be a string'
+      })
+    }
+
+    const MAX_CRON_LENGTH = 100
+    if (cronExpression.length > MAX_CRON_LENGTH) {
+      return res.status(400).json({
+        error: 'Invalid parameter',
+        message: `cronExpression too long (max ${MAX_CRON_LENGTH} characters)`
+      })
+    }
+
+    if (!accountTestSchedulerService.validateCronExpression(cronExpression)) {
+      return res.status(400).json({
+        error: 'Invalid parameter',
+        message: `Invalid cron expression: ${cronExpression}. Format: "minute hour day month weekday" (e.g., "*/5 * * * *" for every 5 minutes)`
+      })
+    }
+
+    return res.json({
+      success: true,
+      message: `Cron 表达式有效，将按 ${process.env.TZ || 'Asia/Shanghai'} 时区调度执行`,
+      data: {
+        cronExpression
+      }
+    })
+  } catch (error) {
+    logger.error('❌ Failed to test cron expression for Claude account:', error)
+    return res.status(500).json({
+      error: 'Failed to test cron expression',
+      message: error.message
+    })
+  }
+})
+
 // 手动触发账户测试（非流式，返回JSON结果）
 router.post('/claude-accounts/:accountId/test-sync', authenticateAdmin, async (req, res) => {
   const { accountId } = req.params

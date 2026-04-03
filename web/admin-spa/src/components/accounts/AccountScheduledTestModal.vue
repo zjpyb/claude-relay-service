@@ -70,13 +70,28 @@
               <label class="mb-2 block text-sm font-medium text-gray-700 dark:text-gray-300">
                 Cron 表达式
               </label>
-              <input
-                v-model="config.cronExpression"
-                class="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-700 placeholder-gray-400 transition focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300 dark:placeholder-gray-500"
-                :disabled="!config.enabled"
-                placeholder="0 8 * * *"
-                type="text"
-              />
+              <div class="flex gap-2">
+                <input
+                  v-model="config.cronExpression"
+                  class="flex-1 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-700 placeholder-gray-400 transition focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300 dark:placeholder-gray-500"
+                  :disabled="!config.enabled"
+                  placeholder="0 8 * * *"
+                  type="text"
+                />
+                <button
+                  :class="[
+                    'rounded-lg border px-3 py-2 text-sm font-medium transition',
+                    testingCron || !config.enabled
+                      ? 'cursor-not-allowed border-gray-200 bg-gray-100 text-gray-400 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-500'
+                      : 'border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100 dark:border-blue-800 dark:bg-blue-900/30 dark:text-blue-300 dark:hover:bg-blue-900/40'
+                  ]"
+                  :disabled="testingCron || !config.enabled"
+                  @click="testCronExpression"
+                >
+                  <i :class="['fas mr-1', testingCron ? 'fa-spinner fa-spin' : 'fa-vial']" />
+                  {{ testingCron ? '测试中' : '测试' }}
+                </button>
+              </div>
               <p class="mt-1.5 text-xs text-gray-500 dark:text-gray-400">
                 格式: 分 时 日 月 周 (例: "0 8 * * *" = 每天8:00)
               </p>
@@ -223,6 +238,7 @@ const emit = defineEmits(['close', 'saved'])
 // 状态
 const loading = ref(false)
 const saving = ref(false)
+const testingCron = ref(false)
 const config = ref({
   enabled: false,
   cronExpression: '0 8 * * *',
@@ -408,6 +424,53 @@ async function saveConfig() {
     showToast('保存失败: ' + err.message, 'error')
   } finally {
     saving.value = false
+  }
+}
+
+async function testCronExpression() {
+  if (!props.account || !config.value.enabled) return
+
+  const cronExpression = config.value.cronExpression?.trim()
+  if (!cronExpression) {
+    showToast('请输入 Cron 表达式', 'error')
+    return
+  }
+
+  testingCron.value = true
+  try {
+    const authToken = localStorage.getItem('authToken')
+    const platformConfig = getPlatformConfig(props.account)
+    if (!platformConfig) {
+      testingCron.value = false
+      return
+    }
+
+    const endpoint = platformConfig
+      .endpointBuilder(props.account.id)
+      .replace('/test-config', '/test-cron')
+
+    const res = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: authToken ? `Bearer ${authToken}` : ''
+      },
+      body: JSON.stringify({
+        cronExpression
+      })
+    })
+
+    const data = await res.json().catch(() => ({}))
+    if (res.ok && data.success) {
+      showToast(data.message || 'Cron 表达式可用', 'success')
+      return
+    }
+
+    showToast(data.message || 'Cron 表达式无效', 'error')
+  } catch (err) {
+    showToast('测试失败: ' + err.message, 'error')
+  } finally {
+    testingCron.value = false
   }
 }
 

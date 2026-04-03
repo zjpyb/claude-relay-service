@@ -921,6 +921,49 @@ router.put('/:accountId/test-config', authenticateAdmin, async (req, res) => {
   }
 })
 
+// 测试 Cron 表达式
+router.post('/:accountId/test-cron', authenticateAdmin, async (req, res) => {
+  const { cronExpression } = req.body
+
+  try {
+    if (!cronExpression || typeof cronExpression !== 'string') {
+      return res.status(400).json({
+        error: 'Invalid parameter',
+        message: 'cronExpression is required and must be a string'
+      })
+    }
+
+    const MAX_CRON_LENGTH = 100
+    if (cronExpression.length > MAX_CRON_LENGTH) {
+      return res.status(400).json({
+        error: 'Invalid parameter',
+        message: `cronExpression too long (max ${MAX_CRON_LENGTH} characters)`
+      })
+    }
+
+    if (!accountTestSchedulerService.validateCronExpression(cronExpression)) {
+      return res.status(400).json({
+        error: 'Invalid parameter',
+        message: `Invalid cron expression: ${cronExpression}. Format: "minute hour day month weekday" (e.g., "*/5 * * * *" for every 5 minutes)`
+      })
+    }
+
+    return res.json({
+      success: true,
+      message: `Cron 表达式有效，将按 ${process.env.TZ || 'Asia/Shanghai'} 时区调度执行`,
+      data: {
+        cronExpression
+      }
+    })
+  } catch (error) {
+    logger.error('❌ Failed to test cron expression for OpenAI account:', error)
+    return res.status(500).json({
+      error: 'Failed to test cron expression',
+      message: error.message
+    })
+  }
+})
+
 // 切换 OpenAI 账户调度状态
 router.put('/:accountId/toggle-schedulable', authenticateAdmin, async (req, res) => {
   try {
