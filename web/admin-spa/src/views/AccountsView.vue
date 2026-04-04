@@ -79,14 +79,14 @@
               ></div>
               <div class="relative flex items-center">
                 <input
-                  v-model="searchKeyword"
+                  v-model="searchInputKeyword"
                   class="h-10 w-full rounded-lg border border-gray-200 bg-white px-3 pl-9 text-sm text-gray-700 placeholder-gray-400 shadow-sm transition-all duration-200 hover:border-gray-300 focus:border-cyan-500 focus:outline-none focus:ring-2 focus:ring-cyan-500/20 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-200 dark:placeholder-gray-500 dark:hover:border-gray-500"
                   placeholder="搜索账户名称..."
                   type="text"
                 />
                 <i class="fas fa-search absolute left-3 text-sm text-cyan-500" />
                 <button
-                  v-if="searchKeyword"
+                  v-if="searchInputKeyword"
                   class="absolute right-2 flex h-5 w-5 items-center justify-center rounded-full text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-700 dark:hover:text-gray-300"
                   @click="clearSearch"
                 >
@@ -479,10 +479,11 @@
                 v-for="account in paginatedAccounts"
                 :key="account.id"
                 :account="account"
+                :actions="accountRenderActions"
+                :helpers="accountRenderHelpers"
                 :needs-horizontal-scroll="needsHorizontalScroll"
                 :selected="selectedAccountIdSet.has(account.id)"
                 :show-checkboxes="shouldShowCheckboxes"
-                v-bind="accountRenderBindings"
                 @toggle-select="toggleAccountSelection"
               />
             </tbody>
@@ -496,9 +497,10 @@
           v-for="account in paginatedAccounts"
           :key="account.id"
           :account="account"
+          :actions="accountRenderActions"
+          :helpers="accountRenderHelpers"
           :selected="selectedAccountIdSet.has(account.id)"
           :show-checkboxes="shouldShowCheckboxes"
-          v-bind="accountRenderBindings"
           @toggle-select="toggleAccountSelection"
         />
       </div>
@@ -1001,8 +1003,10 @@ const accountGroups = ref([])
 const groupFilter = ref('all')
 const platformFilter = ref('all')
 const statusFilter = ref('all') // 状态过滤 (normal/rateLimited/other/all)
+const searchInputKeyword = ref('')
 const searchKeyword = ref('')
 const PAGE_SIZE_STORAGE_KEY = 'accountsPageSize'
+const SEARCH_DEBOUNCE_MS = 180
 const getInitialPageSize = () => {
   const saved = localStorage.getItem(PAGE_SIZE_STORAGE_KEY)
   if (saved) {
@@ -1251,6 +1255,8 @@ const groupOptions = computed(() => {
 
 const shouldShowCheckboxes = computed(() => showCheckboxes.value)
 const selectedAccountIdSet = computed(() => new Set(selectedAccounts.value))
+const accountSearchTextById = shallowRef(new Map())
+const accountActionsCache = new Map()
 
 // 模态框状态
 const showCreateAccountModal = ref(false)
@@ -1258,7 +1264,7 @@ const newAccountPlatform = ref(null) // 跟踪新建账户选择的平台
 const showEditAccountModal = ref(false)
 const editingAccount = ref(null)
 
-const collectAccountSearchableStrings = (account) => {
+const buildAccountSearchText = (account) => {
   const values = new Set()
 
   const baseFields = [
@@ -1309,13 +1315,30 @@ const collectAccountSearchableStrings = (account) => {
   })
 
   return Array.from(values)
+    .map((value) => value.toLowerCase())
+    .join('\n')
+}
+
+const rebuildAccountSearchIndex = (accountList = accounts.value) => {
+  const nextIndex = new Map()
+  const list = Array.isArray(accountList) ? accountList : []
+
+  list.forEach((account) => {
+    if (!account?.id) {
+      return
+    }
+
+    nextIndex.set(account.id, buildAccountSearchText(account))
+  })
+
+  accountSearchTextById.value = nextIndex
 }
 
 const accountMatchesKeyword = (account, normalizedKeyword) => {
   if (!normalizedKeyword) return true
-  return collectAccountSearchableStrings(account).some((value) =>
-    value.toLowerCase().includes(normalizedKeyword)
-  )
+  const cachedSearchText = account?.id ? accountSearchTextById.value.get(account.id) : ''
+  const searchableText = cachedSearchText || buildAccountSearchText(account)
+  return searchableText.includes(normalizedKeyword)
 }
 
 const canViewUsage = (account) => !!account && supportedUsagePlatforms.includes(account.platform)
@@ -1338,8 +1361,33 @@ const showResetButton = (account) => {
   return supportedPlatforms.includes(account.platform) && isAccountRoutingBlocked(account)
 }
 
+const getAccountActionsSignature = (account) => {
+  if (!account) {
+    return 'empty'
+  }
+
+  return [
+    showResetButton(account) ? '1' : '0',
+    canViewUsage(account) ? '1' : '0',
+    canTestAccount(account) ? '1' : '0',
+    canScheduleTestAccount(account) ? '1' : '0'
+  ].join(':')
+}
+
 // 获取账户操作菜单项（用于小屏下拉菜单）
 const getAccountActions = (account) => {
+  if (!account) {
+    return []
+  }
+
+  const cacheKey = account.id || account
+  const signature = getAccountActionsSignature(account)
+  const cached = accountActionsCache.get(cacheKey)
+
+  if (cached && cached.account === account && cached.signature === signature) {
+    return cached.actions
+  }
+
   const actions = []
 
   // 重置状态（仅在需要时显示）
@@ -1401,6 +1449,12 @@ const getAccountActions = (account) => {
     icon: 'fa-trash',
     color: 'red',
     handler: () => deleteAccount(account)
+  })
+
+  accountActionsCache.set(cacheKey, {
+    account,
+    signature,
+    actions
   })
 
   return actions
@@ -2253,7 +2307,6 @@ const loadAccounts = async (forceReload = false) => {
         currentAutoRecoverySignatures.has(signature)
       )
     )
-    cleanupSelectedAccounts()
 
     // 异步加载 Claude OAuth 账户的 usage 数据
     if (filteredAccounts.some((acc) => acc.platform === 'claude')) {
@@ -2336,6 +2389,11 @@ const formatLastUsed = (dateString) => {
 }
 
 const clearSearch = () => {
+  if (searchDebounceTimer) {
+    clearTimeout(searchDebounceTimer)
+    searchDebounceTimer = null
+  }
+  searchInputKeyword.value = ''
   searchKeyword.value = ''
   currentPage.value = 1
 }
@@ -3907,12 +3965,29 @@ const calculateDailyCost = (account) => {
 
 watch(searchKeyword, () => {
   currentPage.value = 1
-  updateSelectAllState()
+})
+
+let searchDebounceTimer = null
+
+watch(searchInputKeyword, (value) => {
+  if (searchDebounceTimer) {
+    clearTimeout(searchDebounceTimer)
+    searchDebounceTimer = null
+  }
+
+  if (!value.trim()) {
+    searchKeyword.value = ''
+    return
+  }
+
+  searchDebounceTimer = setTimeout(() => {
+    searchKeyword.value = value
+    searchDebounceTimer = null
+  }, SEARCH_DEBOUNCE_MS)
 })
 
 watch(pageSize, (newSize) => {
   localStorage.setItem(PAGE_SIZE_STORAGE_KEY, newSize.toString())
-  updateSelectAllState()
 })
 
 watch(
@@ -3921,7 +3996,6 @@ watch(
     if (currentPage.value > totalPages.value) {
       currentPage.value = totalPages.value || 1
     }
-    updateSelectAllState()
   }
 )
 
@@ -3940,10 +4014,6 @@ watch(
 //   }
 // })
 
-watch(currentPage, () => {
-  updateSelectAllState()
-})
-
 watch(paginatedAccounts, () => {
   updateSelectAllState()
   // 数据变化后重新检测是否需要横向滚动
@@ -3952,7 +4022,9 @@ watch(paginatedAccounts, () => {
   })
 })
 
-watch(accounts, () => {
+watch(accounts, (nextAccounts) => {
+  rebuildAccountSearchIndex(nextAccounts)
+  accountActionsCache.clear()
   cleanupSelectedAccounts()
 })
 // 到期时间相关方法
@@ -3989,7 +4061,7 @@ const closeAccountExpiryEdit = () => {
   editingExpiryAccount.value = null
 }
 
-const accountRenderBindings = {
+const accountRenderHelpers = {
   copyText,
   formatNumber,
   formatCost,
@@ -4031,13 +4103,16 @@ const accountRenderBindings = {
   isExpired,
   isExpiringSoon,
   formatExpireDate,
+  getAccountStatusClass,
+  getAccountStatusDotClass,
+  getAccountStatusText
+}
+
+const accountRenderActions = {
   showResetButton,
   canViewUsage,
   canTestAccount,
   canScheduleTestAccount,
-  getAccountStatusClass,
-  getAccountStatusDotClass,
-  getAccountStatusText,
   getAccountActions,
   handleBalanceError,
   handleBalanceRefreshed,
@@ -4190,6 +4265,10 @@ onUnmounted(() => {
   if (autoRecoveryTimer) {
     clearInterval(autoRecoveryTimer)
     autoRecoveryTimer = null
+  }
+  if (searchDebounceTimer) {
+    clearTimeout(searchDebounceTimer)
+    searchDebounceTimer = null
   }
   window.removeEventListener('resize', syncViewportState)
 })

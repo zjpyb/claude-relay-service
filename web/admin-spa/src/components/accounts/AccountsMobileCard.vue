@@ -487,11 +487,9 @@
 </template>
 
 <script setup>
-import { toRefs, useAttrs } from 'vue'
+import { toRefs } from 'vue'
 
 import BalanceDisplay from '@/components/accounts/BalanceDisplay.vue'
-
-defineOptions({ inheritAttrs: false })
 
 const props = defineProps({
   account: {
@@ -505,11 +503,18 @@ const props = defineProps({
   showCheckboxes: {
     type: Boolean,
     default: false
+  },
+  helpers: {
+    type: Object,
+    required: true
+  },
+  actions: {
+    type: Object,
+    required: true
   }
 })
 
 const emit = defineEmits(['toggle-select'])
-const attrs = useAttrs()
 const { account, selected, showCheckboxes } = toRefs(props)
 
 const {
@@ -530,15 +535,18 @@ const {
   formatSessionWindow,
   getSessionProgressBarClass,
   formatRemainingTime,
-  canViewUsage,
-  canTestAccount,
-  canScheduleTestAccount,
   getAccountStatusClass,
   getAccountStatusDotClass,
   getAccountStatusText,
   getRoutingBlockReasonSummary,
   isAccountRoutingBlocked,
-  isClaudeOAuth,
+  isClaudeOAuth
+} = props.helpers
+
+const {
+  canViewUsage,
+  canTestAccount,
+  canScheduleTestAccount,
   showResetButton,
   handleBalanceError,
   handleBalanceRefreshed,
@@ -551,7 +559,7 @@ const {
   openScheduledTestModal,
   editAccount,
   deleteAccount
-} = attrs
+} = props.actions
 
 const handleSelectionChange = (event) => {
   emit('toggle-select', account.value.id, event.target.checked)
