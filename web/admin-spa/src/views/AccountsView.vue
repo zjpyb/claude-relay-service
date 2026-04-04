@@ -478,6 +478,12 @@
               <AccountsTableRow
                 v-for="account in paginatedAccounts"
                 :key="account.id"
+                v-memo="[
+                  account,
+                  selectedAccountIdSet.has(account.id),
+                  shouldShowCheckboxes,
+                  needsHorizontalScroll
+                ]"
                 :account="account"
                 :actions="accountRenderActions"
                 :helpers="accountRenderHelpers"
@@ -496,6 +502,7 @@
         <AccountsMobileCard
           v-for="account in paginatedAccounts"
           :key="account.id"
+          v-memo="[account, selectedAccountIdSet.has(account.id), shouldShowCheckboxes]"
           :account="account"
           :actions="accountRenderActions"
           :helpers="accountRenderHelpers"
@@ -2050,10 +2057,9 @@ const refreshVisibleBalances = async () => {
 }
 
 const updateSelectAllState = () => {
+  const selectedIds = selectedAccountIdSet.value
   const currentIds = paginatedAccounts.value.map((account) => account.id)
-  const selectedInCurrentPage = currentIds.filter((id) =>
-    selectedAccounts.value.includes(id)
-  ).length
+  const selectedInCurrentPage = currentIds.filter((id) => selectedIds.has(id)).length
   const totalInCurrentPage = currentIds.length
 
   if (selectedInCurrentPage === 0) {
@@ -2073,28 +2079,29 @@ const toggleAccountSelection = (accountId, checked) => {
     return
   }
 
+  const nextSelectedIds = new Set(selectedAccountIdSet.value)
   if (checked) {
-    if (!selectedAccounts.value.includes(accountId)) {
-      selectedAccounts.value.push(accountId)
-    }
+    nextSelectedIds.add(accountId)
   } else {
-    selectedAccounts.value = selectedAccounts.value.filter((id) => id !== accountId)
+    nextSelectedIds.delete(accountId)
   }
 
+  selectedAccounts.value = Array.from(nextSelectedIds)
   updateSelectAllState()
 }
 
 const handleSelectAll = () => {
+  const nextSelectedIds = new Set(selectedAccountIdSet.value)
   if (selectAllChecked.value) {
     paginatedAccounts.value.forEach((account) => {
-      if (!selectedAccounts.value.includes(account.id)) {
-        selectedAccounts.value.push(account.id)
-      }
+      nextSelectedIds.add(account.id)
     })
   } else {
-    const currentIds = new Set(paginatedAccounts.value.map((account) => account.id))
-    selectedAccounts.value = selectedAccounts.value.filter((id) => !currentIds.has(id))
+    paginatedAccounts.value.forEach((account) => {
+      nextSelectedIds.delete(account.id)
+    })
   }
+  selectedAccounts.value = Array.from(nextSelectedIds)
   updateSelectAllState()
 }
 
@@ -2111,7 +2118,7 @@ const toggleSelectionMode = () => {
 
 const cleanupSelectedAccounts = () => {
   const validIds = new Set(accounts.value.map((account) => account.id))
-  selectedAccounts.value = selectedAccounts.value.filter((id) => validIds.has(id))
+  selectedAccounts.value = Array.from(selectedAccountIdSet.value).filter((id) => validIds.has(id))
   updateSelectAllState()
 }
 
