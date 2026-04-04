@@ -187,60 +187,20 @@
         <span
           :class="[
             'inline-flex items-center rounded-full px-3 py-1 text-xs font-semibold',
-            account.status === 'blocked'
-              ? 'bg-orange-100 text-orange-800'
-              : account.status === 'unauthorized'
-                ? 'bg-red-100 text-red-800'
-                : account.status === 'temp_error'
-                  ? 'bg-orange-100 text-orange-800'
-                  : account.isActive
-                    ? 'bg-green-100 text-green-800'
-                    : 'bg-red-100 text-red-800'
+            statusMeta.badgeClass
           ]"
         >
-          <div
-            :class="[
-              'mr-2 h-2 w-2 rounded-full',
-              account.status === 'blocked'
-                ? 'bg-orange-500'
-                : account.status === 'unauthorized'
-                  ? 'bg-red-500'
-                  : account.status === 'temp_error'
-                    ? 'bg-orange-500'
-                    : account.isActive
-                      ? 'bg-green-500'
-                      : 'bg-red-500'
-            ]"
-          />
-          {{
-            account.status === 'blocked'
-              ? '已封锁'
-              : account.status === 'unauthorized'
-                ? '异常'
-                : account.status === 'temp_error'
-                  ? '临时异常'
-                  : account.isActive
-                    ? '正常'
-                    : '异常'
-          }}
+          <div :class="['mr-2 h-2 w-2 rounded-full', statusMeta.dotClass]" />
+          {{ statusMeta.text }}
         </span>
         <span
-          v-if="
-            account.status === 'rateLimited' ||
-            (account.rateLimitStatus && account.rateLimitStatus.isRateLimited) ||
-            account.rateLimitStatus === 'limited'
-          "
+          v-if="isRateLimited"
           class="inline-flex items-center rounded-full bg-yellow-100 px-3 py-1 text-xs font-semibold text-yellow-800"
         >
           <i class="fas fa-exclamation-triangle mr-1" />
           限流中
-          <span
-            v-if="
-              account.rateLimitStatus &&
-              typeof account.rateLimitStatus === 'object' &&
-              account.rateLimitStatus.minutesRemaining > 0
-            "
-            >({{ formatRateLimitTime(account.rateLimitStatus.minutesRemaining) }})</span
+          <span v-if="rateLimitMinutesRemaining"
+            >({{ formatRateLimitTime(rateLimitMinutesRemaining) }})</span
           >
         </span>
         <TempUnavailableBadge
@@ -254,8 +214,8 @@
           <i class="fas fa-pause-circle mr-1" />
           不可调度
           <el-tooltip
-            v-if="getSchedulableReason(account)"
-            :content="getSchedulableReason(account)"
+            v-if="schedulableReasonText"
+            :content="schedulableReasonText"
             effect="dark"
             placement="top"
           >
@@ -285,11 +245,11 @@
           {{ account.errorMessage }}
         </span>
         <span
-          v-if="isAccountRoutingBlocked(account)"
+          v-if="isRoutingBlocked"
           class="mt-1 block max-w-xl truncate text-xs font-medium text-red-600 dark:text-red-300"
-          :title="`不可路由：${getRoutingBlockReasonSummary(account)}`"
+          :title="`不可路由：${routingBlockReason}`"
         >
-          不可路由：{{ getRoutingBlockReasonSummary(account) }}
+          不可路由：{{ routingBlockReason }}
         </span>
         <span
           v-if="account.accountType === 'dedicated'"
@@ -333,17 +293,13 @@
         :account-id="account.id"
         :initial-balance="account.balanceInfo"
         :platform="account.platform"
-        :query-mode="
-          account.platform === 'gemini' && account.oauthProvider === 'antigravity'
-            ? 'auto'
-            : 'local'
-        "
+        :query-mode="balanceQueryMode"
         @error="handleBalanceErrorEvent"
         @refreshed="handleBalanceRefreshedEvent"
       />
       <div class="mt-1 text-xs">
         <button
-          v-if="!(account.platform === 'gemini' && account.oauthProvider === 'antigravity')"
+          v-if="showBalanceScriptConfig"
           class="text-blue-500 hover:underline dark:text-blue-300"
           @click="openBalanceScriptModal(account)"
         >
@@ -354,7 +310,7 @@
     <td class="whitespace-nowrap px-3 py-4">
       <div v-if="account.platform === 'claude'" class="space-y-2">
         <!-- OAuth 账户：显示三窗口 OAuth usage -->
-        <div v-if="isClaudeOAuth(account) && account.claudeUsage" class="space-y-2">
+        <div v-if="isClaudeOauthAccount && account.claudeUsage" class="space-y-2">
           <!-- 5小时窗口 -->
           <div class="rounded-lg bg-gray-50 p-2 dark:bg-gray-700/70">
             <div class="flex items-center gap-2">
@@ -458,9 +414,7 @@
         <!-- Setup Token 账户：显示原有的会话窗口时间进度 -->
         <div
           v-else-if="
-            !isClaudeOAuth(account) &&
-            account.sessionWindow &&
-            account.sessionWindow.hasActiveWindow
+            !isClaudeOauthAccount && account.sessionWindow && account.sessionWindow.hasActiveWindow
           "
           class="space-y-2"
         >
@@ -529,7 +483,7 @@
             <div class="flex items-center justify-between text-xs">
               <span class="text-gray-600 dark:text-gray-300">额度进度</span>
               <span class="font-medium text-gray-700 dark:text-gray-200">
-                {{ getQuotaUsagePercent(account).toFixed(1) }}%
+                {{ quotaUsagePercent.toFixed(1) }}%
               </span>
             </div>
             <div class="flex items-center gap-2">
@@ -537,9 +491,9 @@
                 <div
                   :class="[
                     'h-2 rounded-full transition-all duration-300',
-                    getQuotaBarClass(getQuotaUsagePercent(account))
+                    getQuotaBarClass(quotaUsagePercent)
                   ]"
-                  :style="{ width: Math.min(100, getQuotaUsagePercent(account)) + '%' }"
+                  :style="{ width: Math.min(100, quotaUsagePercent) + '%' }"
                 />
               </div>
               <span class="min-w-[32px] text-xs font-medium text-gray-700 dark:text-gray-200">
@@ -567,7 +521,7 @@
               v-if="Number(account.maxConcurrentTasks || 0) > 0"
               class="font-medium text-gray-700 dark:text-gray-200"
             >
-              {{ getConsoleConcurrencyPercent(account).toFixed(0) }}%
+              {{ consoleConcurrencyPercent.toFixed(0) }}%
             </span>
           </div>
           <div v-if="Number(account.maxConcurrentTasks || 0) > 0" class="flex items-center gap-2">
@@ -575,11 +529,9 @@
               <div
                 :class="[
                   'h-2 rounded-full transition-all duration-300',
-                  getConcurrencyBarClass(getConsoleConcurrencyPercent(account))
+                  getConcurrencyBarClass(consoleConcurrencyPercent)
                 ]"
-                :style="{
-                  width: Math.min(100, getConsoleConcurrencyPercent(account)) + '%'
-                }"
+                :style="{ width: Math.min(100, consoleConcurrencyPercent) + '%' }"
               />
             </div>
             <span :class="['min-w-[48px] text-xs font-medium', getConcurrencyLabelClass(account)]">
@@ -762,7 +714,7 @@
       <!-- 宽度足够时显示所有按钮 -->
       <div v-if="!needsHorizontalScroll" class="flex items-center gap-1">
         <button
-          v-if="showResetButton(account)"
+          v-if="showResetAction"
           :class="[
             'rounded px-2.5 py-1 text-xs font-medium transition-colors',
             account.isResetting
@@ -793,7 +745,7 @@
           <span class="ml-1">{{ account.schedulable ? '调度' : '停用' }}</span>
         </button>
         <button
-          v-if="canViewUsage(account)"
+          v-if="canViewUsageAction"
           class="rounded bg-indigo-100 px-2.5 py-1 text-xs font-medium text-indigo-700 transition-colors hover:bg-indigo-200"
           title="查看使用详情"
           @click="openAccountUsageModal(account)"
@@ -810,7 +762,7 @@
           <span class="ml-1">错误</span>
         </button>
         <button
-          v-if="canTestAccount(account)"
+          v-if="canTestAccountAction"
           class="rounded bg-cyan-100 px-2.5 py-1 text-xs font-medium text-cyan-700 transition-colors hover:bg-cyan-200 dark:bg-cyan-900/40 dark:text-cyan-300 dark:hover:bg-cyan-800/50"
           title="测试账户连通性"
           @click="openAccountTestModal(account)"
@@ -819,7 +771,7 @@
           <span class="ml-1">测试</span>
         </button>
         <button
-          v-if="canScheduleTestAccount(account)"
+          v-if="canScheduleTestAction"
           class="rounded bg-amber-100 px-2.5 py-1 text-xs font-medium text-amber-700 transition-colors hover:bg-amber-200 dark:bg-amber-900/40 dark:text-amber-300 dark:hover:bg-amber-800/50"
           title="定时测试配置"
           @click="openScheduledTestModal(account)"
@@ -877,7 +829,7 @@
 </template>
 
 <script setup>
-import { toRefs } from 'vue'
+import { computed, toRefs } from 'vue'
 
 import ActionDropdown from '@/components/common/ActionDropdown.vue'
 import BalanceDisplay from '@/components/accounts/BalanceDisplay.vue'
@@ -975,6 +927,85 @@ const {
   editAccount,
   deleteAccount
 } = props.actions
+
+const accountValue = computed(() => account.value || {})
+const isAntigravityGemini = computed(
+  () =>
+    accountValue.value.platform === 'gemini' && accountValue.value.oauthProvider === 'antigravity'
+)
+const balanceQueryMode = computed(() => (isAntigravityGemini.value ? 'auto' : 'local'))
+const showBalanceScriptConfig = computed(() => !isAntigravityGemini.value)
+const schedulableReasonText = computed(() => getSchedulableReason(accountValue.value))
+const isRoutingBlocked = computed(() => isAccountRoutingBlocked(accountValue.value))
+const routingBlockReason = computed(() => getRoutingBlockReasonSummary(accountValue.value))
+const showResetAction = computed(() => showResetButton(accountValue.value))
+const canViewUsageAction = computed(() => canViewUsage(accountValue.value))
+const canTestAccountAction = computed(() => canTestAccount(accountValue.value))
+const canScheduleTestAction = computed(() => canScheduleTestAccount(accountValue.value))
+const isClaudeOauthAccount = computed(() => isClaudeOAuth(accountValue.value))
+const quotaUsagePercent = computed(() => getQuotaUsagePercent(accountValue.value))
+const consoleConcurrencyPercent = computed(() => getConsoleConcurrencyPercent(accountValue.value))
+const isRateLimited = computed(() => {
+  const currentAccount = accountValue.value
+  return (
+    currentAccount.status === 'rateLimited' ||
+    (currentAccount.rateLimitStatus && currentAccount.rateLimitStatus.isRateLimited) ||
+    currentAccount.rateLimitStatus === 'limited'
+  )
+})
+const rateLimitMinutesRemaining = computed(() => {
+  const currentAccount = accountValue.value
+  if (
+    currentAccount.rateLimitStatus &&
+    typeof currentAccount.rateLimitStatus === 'object' &&
+    currentAccount.rateLimitStatus.minutesRemaining > 0
+  ) {
+    return currentAccount.rateLimitStatus.minutesRemaining
+  }
+
+  return null
+})
+const statusMeta = computed(() => {
+  const currentAccount = accountValue.value
+
+  if (currentAccount.status === 'blocked') {
+    return {
+      badgeClass: 'bg-orange-100 text-orange-800',
+      dotClass: 'bg-orange-500',
+      text: '已封锁'
+    }
+  }
+
+  if (currentAccount.status === 'unauthorized') {
+    return {
+      badgeClass: 'bg-red-100 text-red-800',
+      dotClass: 'bg-red-500',
+      text: '异常'
+    }
+  }
+
+  if (currentAccount.status === 'temp_error') {
+    return {
+      badgeClass: 'bg-orange-100 text-orange-800',
+      dotClass: 'bg-orange-500',
+      text: '临时异常'
+    }
+  }
+
+  if (currentAccount.isActive) {
+    return {
+      badgeClass: 'bg-green-100 text-green-800',
+      dotClass: 'bg-green-500',
+      text: '正常'
+    }
+  }
+
+  return {
+    badgeClass: 'bg-red-100 text-red-800',
+    dotClass: 'bg-red-500',
+    text: '异常'
+  }
+})
 
 const handleSelectionChange = (event) => {
   emit('toggle-select', account.value.id, event.target.checked)

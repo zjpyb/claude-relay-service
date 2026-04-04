@@ -137,6 +137,14 @@ import { ref, computed, onMounted, watch } from 'vue'
 
 import { getAccountBalanceApi, refreshAccountBalanceApi } from '@/utils/http_apis'
 import { formatNumber } from '@/utils/tools'
+import {
+  clearPendingBalanceRequest,
+  getBalanceCacheKey,
+  getCachedBalance,
+  getPendingBalanceRequest,
+  setCachedBalance,
+  setPendingBalanceRequest
+} from '@/components/accounts/balanceDisplayCache'
 
 const props = defineProps({
   accountId: { type: String, required: true },
@@ -153,6 +161,13 @@ const balanceData = ref(props.initialBalance)
 const loading = ref(false)
 const refreshing = ref(false)
 const requestError = ref(null)
+const cacheKey = computed(() =>
+  getBalanceCacheKey({
+    accountId: props.accountId,
+    platform: props.platform,
+    queryMode: props.queryMode
+  })
+)
 
 const sourceClass = computed(() => {
   const source = balanceData.value?.source
@@ -259,9 +274,34 @@ const primaryText = computed(() => {
   return `今日成本 ${formatCurrency(dailyCost)}`
 })
 
-const load = async () => {
+const load = async ({ force = false } = {}) => {
   if (!props.autoLoad) return
   if (!props.accountId || !props.platform) return
+
+  const currentCacheKey = cacheKey.value
+  if (!force) {
+    const cachedBalance = getCachedBalance(currentCacheKey)
+    if (cachedBalance) {
+      balanceData.value = cachedBalance
+      requestError.value = null
+      return
+    }
+
+    const pendingRequest = getPendingBalanceRequest(currentCacheKey)
+    if (pendingRequest) {
+      loading.value = true
+      requestError.value = null
+
+      try {
+        balanceData.value = await pendingRequest
+      } catch (error) {
+        requestError.value = error?.message || '加载失败'
+      } finally {
+        loading.value = false
+      }
+      return
+    }
+  }
 
   loading.value = true
   requestError.value = null
@@ -270,13 +310,27 @@ const load = async () => {
     platform: props.platform,
     queryApi: props.queryMode === 'api' ? true : props.queryMode === 'auto' ? 'auto' : false
   }
-  const response = await getAccountBalanceApi(props.accountId, params)
-  if (response?.success) {
-    balanceData.value = response.data
-  } else {
-    requestError.value = response?.error || '加载失败'
+
+  const requestPromise = (async () => {
+    const response = await getAccountBalanceApi(props.accountId, params)
+    if (response?.success) {
+      setCachedBalance(currentCacheKey, response.data)
+      return response.data
+    }
+
+    throw new Error(response?.error || '加载失败')
+  })()
+
+  setPendingBalanceRequest(currentCacheKey, requestPromise)
+
+  try {
+    balanceData.value = await requestPromise
+  } catch (error) {
+    requestError.value = error?.message || '加载失败'
+  } finally {
+    clearPendingBalanceRequest(currentCacheKey)
+    loading.value = false
   }
-  loading.value = false
 }
 
 const refresh = async () => {
@@ -284,12 +338,15 @@ const refresh = async () => {
   if (refreshing.value) return
   if (!canRefresh.value) return
 
+  const currentCacheKey = cacheKey.value
   refreshing.value = true
   requestError.value = null
+  clearPendingBalanceRequest(currentCacheKey)
 
   const response = await refreshAccountBalanceApi(props.accountId, { platform: props.platform })
   if (response?.success) {
     balanceData.value = response.data
+    setCachedBalance(currentCacheKey, response.data)
     emit('refreshed', response.data)
   } else {
     requestError.value = response?.error || '刷新失败'
@@ -298,7 +355,7 @@ const refresh = async () => {
 }
 
 const reload = async () => {
-  await load()
+  await load({ force: true })
 }
 
 const formatQuotaNumber = (num) => {
@@ -347,8 +404,10 @@ watch(
   (newVal) => {
     if (newVal) {
       balanceData.value = newVal
+      setCachedBalance(cacheKey.value, newVal)
     }
-  }
+  },
+  { immediate: true }
 )
 
 onMounted(() => {

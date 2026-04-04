@@ -1257,6 +1257,8 @@ const shouldShowCheckboxes = computed(() => showCheckboxes.value)
 const selectedAccountIdSet = computed(() => new Set(selectedAccounts.value))
 const accountSearchTextById = shallowRef(new Map())
 const accountActionsCache = new Map()
+const ACCOUNT_RUNTIME_STATE_KEYS = new Set(['isResetting', 'isTogglingSchedulable'])
+const ACCOUNT_ASYNC_DERIVED_STATE_KEYS = new Set(['balanceInfo', 'claudeUsage'])
 
 // 模态框状态
 const showCreateAccountModal = ref(false)
@@ -1332,6 +1334,69 @@ const rebuildAccountSearchIndex = (accountList = accounts.value) => {
   })
 
   accountSearchTextById.value = nextIndex
+}
+
+const refreshAccountDerivedCaches = (account) => {
+  if (!account?.id) {
+    return
+  }
+
+  accountSearchTextById.value.set(account.id, buildAccountSearchText(account))
+  accountActionsCache.delete(account.id)
+}
+
+const reconcileAccountRecord = (currentAccount, nextAccount) => {
+  if (!currentAccount) {
+    return nextAccount
+  }
+
+  const preservedState = {}
+  ACCOUNT_RUNTIME_STATE_KEYS.forEach((key) => {
+    if (currentAccount[key] !== undefined) {
+      preservedState[key] = currentAccount[key]
+    }
+  })
+  ACCOUNT_ASYNC_DERIVED_STATE_KEYS.forEach((key) => {
+    if (nextAccount[key] === undefined && currentAccount[key] !== undefined) {
+      preservedState[key] = currentAccount[key]
+    }
+  })
+
+  Object.keys(currentAccount).forEach((key) => {
+    if (key in nextAccount || key in preservedState) {
+      return
+    }
+    delete currentAccount[key]
+  })
+
+  Object.assign(currentAccount, nextAccount, preservedState)
+  return currentAccount
+}
+
+const syncAccountsCollection = (nextAccounts) => {
+  const previousAccounts = Array.isArray(accounts.value) ? accounts.value : []
+  const previousAccountById = new Map(
+    previousAccounts.filter((account) => account?.id).map((account) => [account.id, account])
+  )
+  const nextAccountIds = new Set()
+  const reconciledAccounts = nextAccounts.map((account) => {
+    if (!account?.id) {
+      return account
+    }
+
+    nextAccountIds.add(account.id)
+    return reconcileAccountRecord(previousAccountById.get(account.id), account)
+  })
+
+  previousAccountById.forEach((_account, accountId) => {
+    if (!nextAccountIds.has(accountId)) {
+      accountActionsCache.delete(accountId)
+    }
+  })
+
+  accounts.value = reconciledAccounts
+  rebuildAccountSearchIndex(reconciledAccounts)
+  cleanupSelectedAccounts()
 }
 
 const accountMatchesKeyword = (account, normalizedKeyword) => {
@@ -1685,89 +1750,82 @@ const totalPages = computed(() => {
   return Math.ceil(total / pageSize.value) || 0
 })
 
+const ACCOUNT_STATS_PLATFORMS = [
+  { value: 'claude', label: 'Claude' },
+  { value: 'claude-console', label: 'Claude Console' },
+  { value: 'gemini', label: 'Gemini' },
+  { value: 'gemini-api', label: 'Gemini API' },
+  { value: 'openai', label: 'OpenAI' },
+  { value: 'azure_openai', label: 'Azure OpenAI' },
+  { value: 'bedrock', label: 'Bedrock' },
+  { value: 'openai-responses', label: 'OpenAI-Responses' },
+  { value: 'ccr', label: 'CCR' },
+  { value: 'droid', label: 'Droid' }
+]
+
+const createEmptyPlatformStat = ({ value, label }) => ({
+  platform: value,
+  platformLabel: label,
+  normal: 0,
+  unschedulable: 0,
+  rateLimit0_1h: 0,
+  rateLimit1_5h: 0,
+  rateLimit5_12h: 0,
+  rateLimit12_24h: 0,
+  rateLimitOver24h: 0,
+  other: 0,
+  total: 0
+})
+
 // 账户统计数据（按平台和状态分类）
 const accountStats = computed(() => {
-  const platforms = [
-    { value: 'claude', label: 'Claude' },
-    { value: 'claude-console', label: 'Claude Console' },
-    { value: 'gemini', label: 'Gemini' },
-    { value: 'gemini-api', label: 'Gemini API' },
-    { value: 'openai', label: 'OpenAI' },
-    { value: 'azure_openai', label: 'Azure OpenAI' },
-    { value: 'bedrock', label: 'Bedrock' },
-    { value: 'openai-responses', label: 'OpenAI-Responses' },
-    { value: 'ccr', label: 'CCR' },
-    { value: 'droid', label: 'Droid' }
-  ]
+  const statsByPlatform = new Map(
+    ACCOUNT_STATS_PLATFORMS.map((platform) => [platform.value, createEmptyPlatformStat(platform)])
+  )
 
-  return platforms
-    .map((p) => {
-      const platformAccounts = accounts.value.filter((acc) => acc.platform === p.value)
+  accounts.value.forEach((account) => {
+    const stat = statsByPlatform.get(account.platform)
+    if (!stat) {
+      return
+    }
 
-      // 先筛选限流账户（优先级最高）
-      const rateLimitedAccounts = platformAccounts.filter((acc) => isAccountRateLimited(acc))
+    stat.total += 1
 
-      // 正常: 非限流 && 激活 && 非阻止 && 可调度
-      const normal = platformAccounts.filter((acc) => {
-        const isRateLimited = isAccountRateLimited(acc)
-        const isBlocked = acc.status === 'blocked' || acc.status === 'unauthorized'
-        return !isRateLimited && acc.isActive && !isBlocked && acc.schedulable !== false
-      }).length
+    const blocked = account.status === 'blocked' || account.status === 'unauthorized'
+    const rateLimited = isAccountRateLimited(account)
 
-      // 不可调度: 非限流 && 激活 && 非阻止 && 不可调度
-      const unschedulable = platformAccounts.filter((acc) => {
-        const isRateLimited = isAccountRateLimited(acc)
-        const isBlocked = acc.status === 'blocked' || acc.status === 'unauthorized'
-        return !isRateLimited && acc.isActive && !isBlocked && acc.schedulable === false
-      }).length
-
-      // 其他: 非限流的异常账户（未激活或被阻止）
-      const other = platformAccounts.filter((acc) => {
-        const isRateLimited = isAccountRateLimited(acc)
-        const isBlocked = acc.status === 'blocked' || acc.status === 'unauthorized'
-        return !isRateLimited && (!acc.isActive || isBlocked)
-      }).length
-
-      const rateLimit0_1h = rateLimitedAccounts.filter((acc) => {
-        const minutes = getRateLimitRemainingMinutes(acc)
-        return minutes > 0 && minutes <= 60
-      }).length
-
-      const rateLimit1_5h = rateLimitedAccounts.filter((acc) => {
-        const minutes = getRateLimitRemainingMinutes(acc)
-        return minutes > 60 && minutes <= 300
-      }).length
-
-      const rateLimit5_12h = rateLimitedAccounts.filter((acc) => {
-        const minutes = getRateLimitRemainingMinutes(acc)
-        return minutes > 300 && minutes <= 720
-      }).length
-
-      const rateLimit12_24h = rateLimitedAccounts.filter((acc) => {
-        const minutes = getRateLimitRemainingMinutes(acc)
-        return minutes > 720 && minutes <= 1440
-      }).length
-
-      const rateLimitOver24h = rateLimitedAccounts.filter((acc) => {
-        const minutes = getRateLimitRemainingMinutes(acc)
-        return minutes > 1440
-      }).length
-
-      return {
-        platform: p.value,
-        platformLabel: p.label,
-        normal,
-        unschedulable,
-        rateLimit0_1h,
-        rateLimit1_5h,
-        rateLimit5_12h,
-        rateLimit12_24h,
-        rateLimitOver24h,
-        other,
-        total: platformAccounts.length
+    if (rateLimited) {
+      const minutes = getRateLimitRemainingMinutes(account)
+      if (minutes > 1440) {
+        stat.rateLimitOver24h += 1
+      } else if (minutes > 720) {
+        stat.rateLimit12_24h += 1
+      } else if (minutes > 300) {
+        stat.rateLimit5_12h += 1
+      } else if (minutes > 60) {
+        stat.rateLimit1_5h += 1
+      } else if (minutes > 0) {
+        stat.rateLimit0_1h += 1
       }
-    })
-    .filter((stat) => stat.total > 0) // 只显示有账户的平台
+      return
+    }
+
+    if (account.isActive && !blocked && account.schedulable !== false) {
+      stat.normal += 1
+      return
+    }
+
+    if (account.isActive && !blocked && account.schedulable === false) {
+      stat.unschedulable += 1
+      return
+    }
+
+    stat.other += 1
+  })
+
+  return ACCOUNT_STATS_PLATFORMS.map((platform) => statsByPlatform.get(platform.value)).filter(
+    (stat) => stat.total > 0
+  )
 })
 
 // 账户统计合计
@@ -1855,6 +1913,9 @@ const paginatedAccounts = computed(() => {
   const end = start + pageSize.value
   return sortedAccounts.value.slice(start, end)
 })
+const paginatedAccountIdsSignature = computed(() =>
+  paginatedAccounts.value.map((account) => account.id).join('|')
+)
 
 const canRefreshVisibleBalances = computed(() => {
   const targets = paginatedAccounts.value
@@ -1886,6 +1947,7 @@ const updateAccountById = (accountId, updater) => {
   }
 
   updater(target)
+  refreshAccountDerivedCaches(target)
   return true
 }
 
@@ -1902,6 +1964,7 @@ const mergeAccountFieldsById = (fieldsById) => {
     }
 
     Object.assign(account, fields)
+    refreshAccountDerivedCaches(account)
     updatedCount += 1
   })
 
@@ -2298,9 +2361,9 @@ const loadAccounts = async (forceReload = false) => {
       // 忽略错误，不影响账户列表显示
     }
 
-    accounts.value = filteredAccounts
+    syncAccountsCollection(filteredAccounts)
     const currentAutoRecoverySignatures = new Set(
-      filteredAccounts.map((account) => getAccountAutoRecoverySignature(account)).filter(Boolean)
+      accounts.value.map((account) => getAccountAutoRecoverySignature(account)).filter(Boolean)
     )
     attemptedAutoRecoveryAtBySignature = new Map(
       Array.from(attemptedAutoRecoveryAtBySignature.entries()).filter(([signature]) =>
@@ -2309,7 +2372,7 @@ const loadAccounts = async (forceReload = false) => {
     )
 
     // 异步加载 Claude OAuth 账户的 usage 数据
-    if (filteredAccounts.some((acc) => acc.platform === 'claude')) {
+    if (accounts.value.some((acc) => acc.platform === 'claude')) {
       loadClaudeUsage().catch((err) => {
         console.debug('Claude usage loading failed:', err)
       })
@@ -2333,11 +2396,18 @@ const loadClaudeUsage = async () => {
   const response = await httpApis.getClaudeAccountsUsageApi()
   if (response.success && response.data) {
     const usageMap = response.data
-    accounts.value.forEach((account) => {
-      if (account.platform === 'claude' && usageMap[account.id]) {
-        account.claudeUsage = usageMap[account.id]
+    const fieldsById = accounts.value.reduce((result, account) => {
+      if (account.platform !== 'claude' || !usageMap[account.id]) {
+        return result
       }
-    })
+
+      result[account.id] = { claudeUsage: usageMap[account.id] }
+      return result
+    }, {})
+
+    if (Object.keys(fieldsById).length > 0) {
+      mergeAccountFieldsById(fieldsById)
+    }
   }
 }
 
@@ -4014,19 +4084,16 @@ watch(
 //   }
 // })
 
-watch(paginatedAccounts, () => {
+watch([paginatedAccountIdsSignature, shouldShowCheckboxes, isDesktopViewport], () => {
   updateSelectAllState()
   // 数据变化后重新检测是否需要横向滚动
-  nextTick(() => {
-    checkHorizontalScroll()
-  })
+  if (isDesktopViewport.value) {
+    nextTick(() => {
+      checkHorizontalScroll()
+    })
+  }
 })
 
-watch(accounts, (nextAccounts) => {
-  rebuildAccountSearchIndex(nextAccounts)
-  accountActionsCache.clear()
-  cleanupSelectedAccounts()
-})
 // 到期时间相关方法
 const formatExpireDate = (dateString) => {
   if (!dateString) return ''
@@ -4181,7 +4248,9 @@ const handleSaveAccountExpiry = async ({ accountId, expiresAt }) => {
     })
     if (data.success) {
       showToast('账户到期时间已更新', 'success')
-      account.expiresAt = expiresAt || null
+      updateAccountById(accountId, (targetAccount) => {
+        targetAccount.expiresAt = expiresAt || null
+      })
       closeAccountExpiryEdit()
     } else {
       showToast(data.message || '更新失败', 'error')

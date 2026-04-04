@@ -13,47 +13,18 @@
         <div
           :class="[
             'flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-lg',
-            account.platform === 'claude'
-              ? 'bg-gradient-to-br from-purple-500 to-purple-600'
-              : account.platform === 'bedrock'
-                ? 'bg-gradient-to-br from-orange-500 to-red-600'
-                : account.platform === 'azure_openai'
-                  ? 'bg-gradient-to-br from-blue-500 to-cyan-600'
-                  : account.platform === 'openai'
-                    ? 'bg-gradient-to-br from-gray-600 to-gray-700'
-                    : account.platform === 'ccr'
-                      ? 'bg-gradient-to-br from-teal-500 to-emerald-600'
-                      : account.platform === 'droid'
-                        ? 'bg-gradient-to-br from-cyan-500 to-sky-600'
-                        : 'bg-gradient-to-br from-blue-500 to-blue-600'
+            platformAvatarClass
           ]"
         >
-          <i
-            :class="[
-              'text-sm text-white',
-              account.platform === 'claude'
-                ? 'fas fa-brain'
-                : account.platform === 'bedrock'
-                  ? 'fab fa-aws'
-                  : account.platform === 'azure_openai'
-                    ? 'fab fa-microsoft'
-                    : account.platform === 'openai'
-                      ? 'fas fa-openai'
-                      : account.platform === 'ccr'
-                        ? 'fas fa-code-branch'
-                        : account.platform === 'droid'
-                          ? 'fas fa-robot'
-                          : 'fas fa-robot'
-            ]"
-          />
+          <i :class="['text-sm text-white', platformIconClass]" />
         </div>
         <div>
           <h4
             class="cursor-pointer text-sm font-semibold text-gray-900 hover:text-blue-600 dark:hover:text-blue-400"
             title="点击复制"
-            @click.stop="copyText(account.name || account.email)"
+            @click.stop="copyText(displayName)"
           >
-            {{ account.name || account.email }}
+            {{ displayName }}
           </h4>
           <div class="mt-0.5 flex items-center gap-2">
             <span class="text-xs text-gray-500 dark:text-gray-400">{{ account.platform }}</span>
@@ -65,11 +36,11 @@
       <span
         :class="[
           'inline-flex items-center rounded-full px-2 py-1 text-xs font-semibold',
-          getAccountStatusClass(account)
+          statusClass
         ]"
       >
-        <div :class="['mr-1.5 h-1.5 w-1.5 rounded-full', getAccountStatusDotClass(account)]" />
-        {{ getAccountStatusText(account) }}
+        <div :class="['mr-1.5 h-1.5 w-1.5 rounded-full', statusDotClass]" />
+        {{ statusText }}
       </span>
     </div>
 
@@ -125,17 +96,13 @@
         :account-id="account.id"
         :initial-balance="account.balanceInfo"
         :platform="account.platform"
-        :query-mode="
-          account.platform === 'gemini' && account.oauthProvider === 'antigravity'
-            ? 'auto'
-            : 'local'
-        "
+        :query-mode="balanceQueryMode"
         @error="handleBalanceErrorEvent"
         @refreshed="handleBalanceRefreshedEvent"
       />
       <div class="mt-1 text-xs">
         <button
-          v-if="!(account.platform === 'gemini' && account.oauthProvider === 'antigravity')"
+          v-if="showBalanceScriptConfig"
           class="text-blue-500 hover:underline dark:text-blue-300"
           @click="openBalanceScriptModal(account)"
         >
@@ -149,7 +116,7 @@
       <!-- 会话窗口 -->
       <div v-if="account.platform === 'claude'" class="space-y-2">
         <!-- OAuth 账户：显示三窗口 OAuth usage -->
-        <div v-if="isClaudeOAuth(account) && account.claudeUsage" class="space-y-2">
+        <div v-if="isClaudeOauthAccount && account.claudeUsage" class="space-y-2">
           <!-- 5小时窗口 -->
           <div class="rounded-lg bg-gray-50 p-2 dark:bg-gray-700/70">
             <div class="flex items-center gap-2">
@@ -253,9 +220,7 @@
         <!-- Setup Token 账户：显示原有的会话窗口时间进度 -->
         <div
           v-else-if="
-            !isClaudeOAuth(account) &&
-            account.sessionWindow &&
-            account.sessionWindow.hasActiveWindow
+            !isClaudeOauthAccount && account.sessionWindow && account.sessionWindow.hasActiveWindow
           "
           class="space-y-1.5 rounded-lg bg-gray-50 p-2 dark:bg-gray-700"
         >
@@ -403,17 +368,17 @@
     </div>
 
     <div
-      v-if="isAccountRoutingBlocked(account)"
+      v-if="isRoutingBlocked"
       class="mb-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700 dark:border-red-800/70 dark:bg-red-900/30 dark:text-red-300"
     >
       <div class="font-semibold">不可路由原因</div>
-      <div class="mt-1 break-all">{{ getRoutingBlockReasonSummary(account) }}</div>
+      <div class="mt-1 break-all">{{ routingBlockReason }}</div>
     </div>
 
     <!-- 操作按钮 -->
     <div class="mt-3 flex gap-2 border-t border-gray-100 pt-3">
       <button
-        v-if="showResetButton(account)"
+        v-if="showResetAction"
         class="flex flex-1 items-center justify-center gap-1 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700 transition-colors hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-60 dark:bg-amber-900/40 dark:text-amber-300 dark:hover:bg-amber-800/50"
         :disabled="account.isResetting"
         @click="resetAccountStatus(account)"
@@ -436,7 +401,7 @@
       </button>
 
       <button
-        v-if="canViewUsage(account)"
+        v-if="canViewUsageAction"
         class="flex flex-1 items-center justify-center gap-1 rounded-lg bg-indigo-50 px-3 py-2 text-xs text-indigo-600 transition-colors hover:bg-indigo-100"
         @click="openAccountUsageModal(account)"
       >
@@ -451,7 +416,7 @@
         错误
       </button>
       <button
-        v-if="canTestAccount(account)"
+        v-if="canTestAccountAction"
         class="flex flex-1 items-center justify-center gap-1 rounded-lg bg-cyan-50 px-3 py-2 text-xs text-cyan-600 transition-colors hover:bg-cyan-100 dark:bg-cyan-900/40 dark:text-cyan-300 dark:hover:bg-cyan-800/50"
         @click="openAccountTestModal(account)"
       >
@@ -460,7 +425,7 @@
       </button>
 
       <button
-        v-if="canScheduleTestAccount(account)"
+        v-if="canScheduleTestAction"
         class="flex flex-1 items-center justify-center gap-1 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-600 transition-colors hover:bg-amber-100 dark:bg-amber-900/40 dark:text-amber-300 dark:hover:bg-amber-800/50"
         @click="openScheduledTestModal(account)"
       >
@@ -487,7 +452,7 @@
 </template>
 
 <script setup>
-import { toRefs } from 'vue'
+import { computed, toRefs } from 'vue'
 
 import BalanceDisplay from '@/components/accounts/BalanceDisplay.vue'
 
@@ -560,6 +525,61 @@ const {
   editAccount,
   deleteAccount
 } = props.actions
+
+const accountValue = computed(() => account.value || {})
+const displayName = computed(() => accountValue.value.name || accountValue.value.email || '')
+const isAntigravityGemini = computed(
+  () =>
+    accountValue.value.platform === 'gemini' && accountValue.value.oauthProvider === 'antigravity'
+)
+const balanceQueryMode = computed(() => (isAntigravityGemini.value ? 'auto' : 'local'))
+const showBalanceScriptConfig = computed(() => !isAntigravityGemini.value)
+const isClaudeOauthAccount = computed(() => isClaudeOAuth(accountValue.value))
+const isRoutingBlocked = computed(() => isAccountRoutingBlocked(accountValue.value))
+const routingBlockReason = computed(() => getRoutingBlockReasonSummary(accountValue.value))
+const showResetAction = computed(() => showResetButton(accountValue.value))
+const canViewUsageAction = computed(() => canViewUsage(accountValue.value))
+const canTestAccountAction = computed(() => canTestAccount(accountValue.value))
+const canScheduleTestAction = computed(() => canScheduleTestAccount(accountValue.value))
+const statusClass = computed(() => getAccountStatusClass(accountValue.value))
+const statusDotClass = computed(() => getAccountStatusDotClass(accountValue.value))
+const statusText = computed(() => getAccountStatusText(accountValue.value))
+const platformAvatarClass = computed(() => {
+  switch (accountValue.value.platform) {
+    case 'claude':
+      return 'bg-gradient-to-br from-purple-500 to-purple-600'
+    case 'bedrock':
+      return 'bg-gradient-to-br from-orange-500 to-red-600'
+    case 'azure_openai':
+      return 'bg-gradient-to-br from-blue-500 to-cyan-600'
+    case 'openai':
+      return 'bg-gradient-to-br from-gray-600 to-gray-700'
+    case 'ccr':
+      return 'bg-gradient-to-br from-teal-500 to-emerald-600'
+    case 'droid':
+      return 'bg-gradient-to-br from-cyan-500 to-sky-600'
+    default:
+      return 'bg-gradient-to-br from-blue-500 to-blue-600'
+  }
+})
+const platformIconClass = computed(() => {
+  switch (accountValue.value.platform) {
+    case 'claude':
+      return 'fas fa-brain'
+    case 'bedrock':
+      return 'fab fa-aws'
+    case 'azure_openai':
+      return 'fab fa-microsoft'
+    case 'openai':
+      return 'fas fa-openai'
+    case 'ccr':
+      return 'fas fa-code-branch'
+    case 'droid':
+      return 'fas fa-robot'
+    default:
+      return 'fas fa-robot'
+  }
+})
 
 const handleSelectionChange = (event) => {
   emit('toggle-select', account.value.id, event.target.checked)
