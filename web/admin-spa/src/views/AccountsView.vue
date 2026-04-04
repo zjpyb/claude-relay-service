@@ -229,7 +229,7 @@
       </div>
 
       <!-- 桌面端表格视图 -->
-      <div v-else class="table-wrapper hidden md:block">
+      <div v-else-if="isDesktopViewport" class="table-wrapper">
         <div ref="tableContainerRef" class="table-container">
           <table class="w-full">
             <thead
@@ -751,35 +751,10 @@
                         >({{ formatRateLimitTime(account.rateLimitStatus.minutesRemaining) }})</span
                       >
                     </span>
-                    <span
+                    <TempUnavailableBadge
                       v-if="account.tempUnavailable"
-                      class="inline-flex items-center rounded-full bg-amber-100 px-3 py-1 text-xs font-semibold text-amber-800 dark:bg-amber-900/30 dark:text-amber-300"
-                    >
-                      <i class="fas fa-clock mr-1" />
-                      临时暂停
-                      <span v-if="getTempUnavailableRemainingSeconds(account.tempUnavailable) > 0">
-                        ({{
-                          formatTempUnavailableTime(
-                            getTempUnavailableRemainingSeconds(account.tempUnavailable)
-                          )
-                        }}
-                        <span v-if="getTempUnavailableCooldownSeconds(account.tempUnavailable) > 0"
-                          >/
-                          {{
-                            formatTempUnavailableTime(
-                              getTempUnavailableCooldownSeconds(account.tempUnavailable)
-                            )
-                          }}</span
-                        >)
-                      </span>
-                      <el-tooltip
-                        :content="getTempUnavailableTooltipContent(account.tempUnavailable)"
-                        effect="dark"
-                        placement="top"
-                      >
-                        <i class="fas fa-info-circle ml-1 cursor-help" />
-                      </el-tooltip>
-                    </span>
+                      :temp-unavailable="account.tempUnavailable"
+                    />
                     <span
                       v-if="account.schedulable === false"
                       class="inline-flex items-center rounded-full bg-gray-100 px-3 py-1 text-xs font-semibold text-gray-700"
@@ -1437,7 +1412,7 @@
       </div>
 
       <!-- 移动端卡片视图 -->
-      <div v-if="!accountsLoading && sortedAccounts.length > 0" class="space-y-3 md:hidden">
+      <div v-else class="space-y-3">
         <div
           v-for="account in paginatedAccounts"
           :key="account.id"
@@ -2052,6 +2027,7 @@
 
     <!-- 确认弹窗 -->
     <ConfirmModal
+      v-if="showConfirmModal"
       :cancel-text="confirmOptions.cancelText"
       :confirm-text="confirmOptions.confirmText"
       :message="confirmOptions.message"
@@ -2075,6 +2051,7 @@
 
     <!-- 错误历史弹窗 -->
     <AccountErrorHistoryModal
+      v-if="showErrorHistoryModal"
       :account-id="errorHistoryTarget.accountId"
       :account-name="errorHistoryTarget.accountName"
       :account-type="errorHistoryTarget.accountType"
@@ -2084,6 +2061,7 @@
 
     <!-- 账户过期时间编辑弹窗 -->
     <AccountExpiryEditModal
+      v-if="editingExpiryAccount"
       ref="expiryEditModalRef"
       :account="editingExpiryAccount || { id: null, expiresAt: null, name: '' }"
       :show="!!editingExpiryAccount"
@@ -2093,6 +2071,7 @@
 
     <!-- 账户测试弹窗 -->
     <UnifiedTestModal
+      v-if="showAccountTestModal"
       :account="testingAccount"
       mode="account"
       :show="showAccountTestModal"
@@ -2101,6 +2080,7 @@
 
     <!-- 定时测试配置弹窗 -->
     <AccountScheduledTestModal
+      v-if="showScheduledTestModal"
       :account="scheduledTestAccount"
       :show="showScheduledTestModal"
       @close="closeScheduledTestModal"
@@ -2108,6 +2088,7 @@
     />
 
     <AccountBalanceScriptModal
+      v-if="showBalanceScriptModal"
       :account="selectedAccountForScript"
       :show="showBalanceScriptModal"
       @close="closeBalanceScriptModal"
@@ -2264,23 +2245,132 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
+import {
+  ref,
+  computed,
+  onMounted,
+  onUnmounted,
+  watch,
+  nextTick,
+  defineComponent,
+  h,
+  markRaw,
+  shallowRef
+} from 'vue'
 import { showToast, copyText, formatNumber, formatRelativeTime } from '@/utils/tools'
 
 import * as httpApis from '@/utils/http_apis'
-import AccountForm from '@/components/accounts/AccountForm.vue'
-import CcrAccountForm from '@/components/accounts/CcrAccountForm.vue'
-import AccountUsageDetailModal from '@/components/accounts/AccountUsageDetailModal.vue'
-import AccountErrorHistoryModal from '@/components/accounts/AccountErrorHistoryModal.vue'
-import AccountExpiryEditModal from '@/components/accounts/AccountExpiryEditModal.vue'
-import UnifiedTestModal from '@/components/common/UnifiedTestModal.vue'
-import AccountScheduledTestModal from '@/components/accounts/AccountScheduledTestModal.vue'
-import ConfirmModal from '@/components/common/ConfirmModal.vue'
 import CustomDropdown from '@/components/common/CustomDropdown.vue'
 import ActionDropdown from '@/components/common/ActionDropdown.vue'
-import GroupManagementModal from '@/components/accounts/GroupManagementModal.vue'
+import AsyncModalError from '@/components/common/AsyncModalError.vue'
+import AsyncModalLoading from '@/components/common/AsyncModalLoading.vue'
+import ConfirmModal from '@/components/common/ConfirmModal.vue'
 import BalanceDisplay from '@/components/accounts/BalanceDisplay.vue'
-import AccountBalanceScriptModal from '@/components/accounts/AccountBalanceScriptModal.vue'
+import TempUnavailableBadge from '@/components/accounts/TempUnavailableBadge.vue'
+import {
+  formatTempUnavailableRecoveryAt,
+  formatTempUnavailableTime,
+  getTempUnavailableCooldownSeconds,
+  getTempUnavailableRecoveryAt,
+  getTempUnavailableRemainingSeconds
+} from '@/utils/temp_unavailable'
+
+const createAsyncModal = (loader) =>
+  defineComponent({
+    inheritAttrs: false,
+    setup(_props, { attrs, slots, expose }) {
+      const loadedComponent = shallowRef(null)
+      const loadStatus = ref('loading')
+      const loadError = ref(null)
+      const childRef = ref(null)
+      let isAlive = true
+
+      const closeFallback = () => {
+        const handler = attrs.onClose
+        if (typeof handler === 'function') {
+          handler()
+        }
+      }
+
+      const loadComponent = async (attempt = 1) => {
+        loadStatus.value = 'loading'
+        loadError.value = null
+
+        try {
+          const mod = await loader()
+          if (!isAlive) return
+          loadedComponent.value = markRaw(mod.default || mod)
+          loadStatus.value = 'ready'
+        } catch (error) {
+          if (!isAlive) return
+          if (attempt < 2) {
+            loadComponent(attempt + 1)
+            return
+          }
+          loadError.value = error
+          loadStatus.value = 'error'
+        }
+      }
+
+      expose(
+        new Proxy(
+          {},
+          {
+            get(_target, key) {
+              const value = childRef.value?.[key]
+              return typeof value === 'function' ? value.bind(childRef.value) : value
+            }
+          }
+        )
+      )
+
+      onMounted(() => {
+        loadComponent()
+      })
+
+      onUnmounted(() => {
+        isAlive = false
+      })
+
+      return () => {
+        if (loadStatus.value === 'ready' && loadedComponent.value) {
+          return h(loadedComponent.value, { ...attrs, ref: childRef }, slots)
+        }
+
+        if (loadStatus.value === 'error') {
+          return h(AsyncModalError, {
+            errorMessage: loadError.value?.message || '请检查网络后重试',
+            onClose: closeFallback,
+            onRetry: () => loadComponent()
+          })
+        }
+
+        return h(AsyncModalLoading)
+      }
+    }
+  })
+
+const AccountForm = createAsyncModal(() => import('@/components/accounts/AccountForm.vue'))
+const CcrAccountForm = createAsyncModal(() => import('@/components/accounts/CcrAccountForm.vue'))
+const AccountUsageDetailModal = createAsyncModal(
+  () => import('@/components/accounts/AccountUsageDetailModal.vue')
+)
+const AccountErrorHistoryModal = createAsyncModal(
+  () => import('@/components/accounts/AccountErrorHistoryModal.vue')
+)
+const AccountExpiryEditModal = createAsyncModal(
+  () => import('@/components/accounts/AccountExpiryEditModal.vue')
+)
+const UnifiedTestModal = createAsyncModal(() => import('@/components/common/UnifiedTestModal.vue'))
+const AccountScheduledTestModal = createAsyncModal(
+  () => import('@/components/accounts/AccountScheduledTestModal.vue')
+)
+const GroupManagementModal = createAsyncModal(
+  () => import('@/components/accounts/GroupManagementModal.vue')
+)
+const AccountBalanceScriptModal = createAsyncModal(
+  () => import('@/components/accounts/AccountBalanceScriptModal.vue')
+)
 
 // 确认弹窗状态
 const showConfirmModal = ref(false)
@@ -2308,7 +2398,6 @@ const handleCancel = () => {
 const accounts = ref([])
 const accountsLoading = ref(false)
 const refreshingBalances = ref(false)
-const tempUnavailableNowTs = ref(Date.now())
 const lastAutoRecoveryReloadTs = ref(0)
 const accountsSortBy = ref('name')
 const accountsSortOrder = ref('asc')
@@ -2432,6 +2521,7 @@ const showGroupManagementModal = ref(false)
 // 表格横向滚动检测
 const tableContainerRef = ref(null)
 const needsHorizontalScroll = ref(false)
+const isDesktopViewport = ref(typeof window !== 'undefined' ? window.innerWidth >= 768 : true)
 
 // 缓存状态标志
 const apiKeysLoaded = ref(false) // 用于其他功能
@@ -3529,10 +3619,12 @@ const loadAccounts = async (forceReload = false) => {
       })
     }
 
-    // 异步加载余额缓存（按平台批量）
-    loadBalanceCacheForAccounts().catch((err) => {
+    // 先补齐批量余额缓存，再渲染列表，避免每行组件初始化时回退为独立请求
+    try {
+      await loadBalanceCacheForAccounts()
+    } catch (err) {
       console.debug('Balance cache loading failed:', err)
-    })
+    }
   } catch (error) {
     showToast('加载账户失败', 'error')
   } finally {
@@ -3802,118 +3894,9 @@ const formatRateLimitTime = (minutes) => {
   }
 }
 
-// 格式化临时暂停剩余时间（秒 → 可读格式）
-const formatTempUnavailableTime = (seconds) => {
-  if (!seconds || seconds <= 0) return ''
-  seconds = Math.floor(seconds)
-  const mins = Math.floor(seconds / 60)
-  const secs = seconds % 60
-  if (mins > 0) return `${mins}m${secs > 0 ? secs + 's' : ''}`
-  return `${secs}s`
-}
-
 const SYSTEM_TIMEZONE_OFFSET = 8
 const AUTO_RECOVERY_RELOAD_COOLDOWN_MS = 5000
 const AUTO_RECOVERY_RETRY_WINDOW_MS = 60000
-
-const toPositiveInteger = (value) => {
-  const parsed = Number(value)
-  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 0
-}
-
-const getTempUnavailableRemainingSeconds = (tempUnavailable) => {
-  if (!tempUnavailable) return 0
-  const serverRemainingSeconds = toPositiveInteger(
-    tempUnavailable.remainingSeconds || tempUnavailable.ttl
-  )
-
-  const recoveryAt = getTempUnavailableRecoveryAt(tempUnavailable)
-  if (!recoveryAt) {
-    return serverRemainingSeconds
-  }
-
-  const recoveryAtTimestamp = new Date(recoveryAt).getTime()
-  if (Number.isNaN(recoveryAtTimestamp)) {
-    return serverRemainingSeconds
-  }
-
-  const liveRemainingSeconds = Math.max(
-    0,
-    Math.ceil((recoveryAtTimestamp - tempUnavailableNowTs.value) / 1000)
-  )
-
-  if (serverRemainingSeconds <= 0) {
-    return liveRemainingSeconds
-  }
-  return Math.min(serverRemainingSeconds, liveRemainingSeconds)
-}
-
-const getTempUnavailableCooldownSeconds = (tempUnavailable) => {
-  if (!tempUnavailable) return 0
-  return toPositiveInteger(tempUnavailable.cooldownSeconds)
-}
-
-const getTempUnavailableRecoveryAt = (tempUnavailable) => {
-  if (!tempUnavailable) return ''
-
-  if (tempUnavailable.expiresAt) {
-    const expiresAt = new Date(tempUnavailable.expiresAt)
-    if (!Number.isNaN(expiresAt.getTime())) {
-      return tempUnavailable.expiresAt
-    }
-  }
-
-  if (tempUnavailable.markedAt) {
-    const markedAt = new Date(tempUnavailable.markedAt)
-    const cooldownSeconds = getTempUnavailableCooldownSeconds(tempUnavailable)
-    if (!Number.isNaN(markedAt.getTime()) && cooldownSeconds > 0) {
-      return new Date(markedAt.getTime() + cooldownSeconds * 1000).toISOString()
-    }
-  }
-
-  return ''
-}
-
-const formatTempUnavailableRecoveryAt = (tempUnavailable) => {
-  const recoveryAt = getTempUnavailableRecoveryAt(tempUnavailable)
-  if (!recoveryAt) return ''
-
-  const recoveryDate = new Date(recoveryAt)
-  if (Number.isNaN(recoveryDate.getTime())) return ''
-
-  const month = `${recoveryDate.getMonth() + 1}`.padStart(2, '0')
-  const day = `${recoveryDate.getDate()}`.padStart(2, '0')
-  const hours = `${recoveryDate.getHours()}`.padStart(2, '0')
-  const minutes = `${recoveryDate.getMinutes()}`.padStart(2, '0')
-  const seconds = `${recoveryDate.getSeconds()}`.padStart(2, '0')
-  return `${month}-${day} ${hours}:${minutes}:${seconds}`
-}
-
-const getTempUnavailableTooltipContent = (tempUnavailable) => {
-  if (!tempUnavailable) return ''
-
-  const details = []
-  const statusCodeText = tempUnavailable.statusCode ? `HTTP ${tempUnavailable.statusCode}` : ''
-  const errorTypeText = tempUnavailable.errorType || 'upstream_error'
-  details.push(`${errorTypeText}${statusCodeText ? ` (${statusCodeText})` : ''}`)
-
-  const cooldownSeconds = getTempUnavailableCooldownSeconds(tempUnavailable)
-  if (cooldownSeconds > 0) {
-    details.push(`内部冷却 ${formatTempUnavailableTime(cooldownSeconds)}`)
-  }
-
-  const remainingSeconds = getTempUnavailableRemainingSeconds(tempUnavailable)
-  if (remainingSeconds > 0) {
-    details.push(`剩余 ${formatTempUnavailableTime(remainingSeconds)}`)
-  }
-
-  const recoveryAtText = formatTempUnavailableRecoveryAt(tempUnavailable)
-  if (recoveryAtText) {
-    details.push(`预计恢复 ${recoveryAtText}`)
-  }
-
-  return details.join('，')
-}
 
 const getAccountRateLimitRecoveryAt = (account) => {
   if (!account) return ''
@@ -5437,18 +5420,25 @@ const checkHorizontalScroll = () => {
   }
 }
 
+const syncViewportState = () => {
+  if (typeof window === 'undefined') {
+    return
+  }
+  isDesktopViewport.value = window.innerWidth >= 768
+  checkHorizontalScroll()
+}
+
 // 窗口大小变化时重新检测
 let resizeObserver = null
-let tempUnavailableCountdownTimer = null
+let autoRecoveryTimer = null
 
 onMounted(() => {
   // 首次加载时强制刷新所有数据
   loadAccounts(true)
 
-  // 让临时不可用剩余时间在页面停留时也可见地递减
-  tempUnavailableCountdownTimer = setInterval(() => {
+  // 自动恢复检查不需要驱动整页响应式，只需定期轮询是否需要重新拉取账户状态
+  autoRecoveryTimer = setInterval(() => {
     const nowTs = Date.now()
-    tempUnavailableNowTs.value = nowTs
 
     if (
       nowTs - lastAutoRecoveryReloadTs.value >= AUTO_RECOVERY_RELOAD_COOLDOWN_MS &&
@@ -5469,7 +5459,7 @@ onMounted(() => {
       lastAutoRecoveryReloadTs.value = nowTs
       loadAccounts(true)
     }
-  }, 1000)
+  }, AUTO_RECOVERY_RELOAD_COOLDOWN_MS)
 
   // 设置ResizeObserver监听表格容器大小变化
   nextTick(() => {
@@ -5483,18 +5473,19 @@ onMounted(() => {
   })
 
   // 监听窗口大小变化
-  window.addEventListener('resize', checkHorizontalScroll)
+  window.addEventListener('resize', syncViewportState)
+  syncViewportState()
 })
 
 onUnmounted(() => {
   if (resizeObserver) {
     resizeObserver.disconnect()
   }
-  if (tempUnavailableCountdownTimer) {
-    clearInterval(tempUnavailableCountdownTimer)
-    tempUnavailableCountdownTimer = null
+  if (autoRecoveryTimer) {
+    clearInterval(autoRecoveryTimer)
+    autoRecoveryTimer = null
   }
-  window.removeEventListener('resize', checkHorizontalScroll)
+  window.removeEventListener('resize', syncViewportState)
 })
 </script>
 
