@@ -822,7 +822,7 @@
           <i class="fas fa-edit" />
           <span class="ml-1">编辑</span>
         </button>
-        <ActionDropdown :actions="getAccountActions(account)" />
+        <ActionDropdown :actions="dropdownActions" />
       </div>
     </td>
   </tr>
@@ -942,6 +942,7 @@ const showResetAction = computed(() => showResetButton(accountValue.value))
 const canViewUsageAction = computed(() => canViewUsage(accountValue.value))
 const canTestAccountAction = computed(() => canTestAccount(accountValue.value))
 const canScheduleTestAction = computed(() => canScheduleTestAccount(accountValue.value))
+const dropdownActions = computed(() => getAccountActions(accountValue.value))
 const isClaudeOauthAccount = computed(() => isClaudeOAuth(accountValue.value))
 const quotaUsagePercent = computed(() => getQuotaUsagePercent(accountValue.value))
 const consoleConcurrencyPercent = computed(() => getConsoleConcurrencyPercent(accountValue.value))

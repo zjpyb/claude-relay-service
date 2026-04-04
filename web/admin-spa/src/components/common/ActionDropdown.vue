@@ -47,7 +47,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onBeforeUnmount, nextTick } from 'vue'
+import { ref, watch, onBeforeUnmount, nextTick } from 'vue'
 
 defineProps({
   actions: {
@@ -63,6 +63,7 @@ const isOpen = ref(false)
 const triggerRef = ref(null)
 const dropdownRef = ref(null)
 const dropdownStyle = ref({})
+let listenersAttached = false
 
 const getActionClass = (action) => {
   const colorMap = {
@@ -175,17 +176,37 @@ const handleClickOutside = (event) => {
   }
 }
 
-onMounted(() => {
+const attachGlobalListeners = () => {
+  if (listenersAttached) {
+    return
+  }
   window.addEventListener('scroll', handleScroll, true)
   window.addEventListener('resize', handleResize)
   document.addEventListener('click', handleClickOutside)
   window.addEventListener('action-dropdown-open', handleGlobalOpen)
-})
+  listenersAttached = true
+}
 
-onBeforeUnmount(() => {
+const detachGlobalListeners = () => {
+  if (!listenersAttached) {
+    return
+  }
   window.removeEventListener('scroll', handleScroll, true)
   window.removeEventListener('resize', handleResize)
   document.removeEventListener('click', handleClickOutside)
   window.removeEventListener('action-dropdown-open', handleGlobalOpen)
+  listenersAttached = false
+}
+
+watch(isOpen, (open) => {
+  if (open) {
+    attachGlobalListeners()
+    return
+  }
+  detachGlobalListeners()
+})
+
+onBeforeUnmount(() => {
+  detachGlobalListeners()
 })
 </script>
