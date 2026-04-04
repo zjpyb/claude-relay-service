@@ -4042,17 +4042,238 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, onMounted } from 'vue'
+import {
+  ref,
+  computed,
+  watch,
+  onMounted,
+  onUnmounted,
+  defineComponent,
+  h,
+  markRaw,
+  shallowRef
+} from 'vue'
 import { showToast } from '@/utils/tools'
 
 import * as httpApis from '@/utils/http_apis'
 import { useAccountsStore } from '@/stores/accounts'
-import ProxyConfig from './ProxyConfig.vue'
-import OAuthFlow from './OAuthFlow.vue'
+import AsyncModalError from '@/components/common/AsyncModalError.vue'
+import AsyncModalLoading from '@/components/common/AsyncModalLoading.vue'
 import TempUnavailablePolicyFields from './TempUnavailablePolicyFields.vue'
 import ConfirmModal from '@/components/common/ConfirmModal.vue'
-import GroupManagementModal from './GroupManagementModal.vue'
-import ApiKeyManagementModal from './ApiKeyManagementModal.vue'
+
+const AsyncSectionLoading = defineComponent({
+  props: {
+    message: {
+      type: String,
+      default: '配置模块加载中...'
+    }
+  },
+  setup(props) {
+    return () =>
+      h(
+        'div',
+        {
+          class:
+            'space-y-4 rounded-2xl border border-gray-200 bg-gray-50/80 p-4 dark:border-gray-700 dark:bg-gray-800/60'
+        },
+        [
+          h('div', { class: 'flex items-center gap-3 text-sm text-gray-600 dark:text-gray-300' }, [
+            h('div', { class: 'loading-spinner h-4 w-4' }),
+            h('span', props.message)
+          ]),
+          h('div', { class: 'grid gap-3 md:grid-cols-2' }, [
+            h('div', { class: 'h-11 animate-pulse rounded-xl bg-gray-200/80 dark:bg-gray-700/80' }),
+            h('div', { class: 'h-11 animate-pulse rounded-xl bg-gray-200/80 dark:bg-gray-700/80' }),
+            h('div', {
+              class:
+                'h-11 animate-pulse rounded-xl bg-gray-200/80 dark:bg-gray-700/80 md:col-span-2'
+            })
+          ])
+        ]
+      )
+  }
+})
+
+const AsyncSectionError = defineComponent({
+  props: {
+    errorMessage: {
+      type: String,
+      default: '请检查网络后重试'
+    }
+  },
+  emits: ['retry'],
+  setup(props, { emit }) {
+    return () =>
+      h(
+        'div',
+        {
+          class:
+            'space-y-3 rounded-2xl border border-red-200 bg-red-50/90 p-4 text-sm text-red-700 dark:border-red-800 dark:bg-red-950/40 dark:text-red-200'
+        },
+        [
+          h('div', { class: 'flex items-start gap-3' }, [
+            h('i', { class: 'fas fa-exclamation-circle mt-0.5' }),
+            h('div', { class: 'space-y-1' }, [
+              h('p', { class: 'font-semibold' }, '代理配置加载失败'),
+              h('p', props.errorMessage)
+            ])
+          ]),
+          h(
+            'button',
+            {
+              class:
+                'inline-flex items-center rounded-lg border border-red-300 px-3 py-1.5 text-sm font-medium transition-colors hover:bg-red-100 dark:border-red-700 dark:hover:bg-red-900/40',
+              type: 'button',
+              onClick: () => emit('retry')
+            },
+            '重试'
+          )
+        ]
+      )
+  }
+})
+
+const createAsyncOverlayComponent = (loader) =>
+  defineComponent({
+    inheritAttrs: false,
+    setup(_props, { attrs, slots, expose }) {
+      const loadedComponent = shallowRef(null)
+      const loadStatus = ref('loading')
+      const loadError = ref(null)
+      const childRef = ref(null)
+      let isAlive = true
+
+      const closeFallback = () => {
+        const handler = attrs.onClose || attrs.onBack
+        if (typeof handler === 'function') {
+          handler()
+        }
+      }
+
+      const loadComponent = async (attempt = 1) => {
+        loadStatus.value = 'loading'
+        loadError.value = null
+
+        try {
+          const mod = await loader()
+          if (!isAlive) return
+          loadedComponent.value = markRaw(mod.default || mod)
+          loadStatus.value = 'ready'
+        } catch (error) {
+          if (!isAlive) return
+          if (attempt < 2) {
+            loadComponent(attempt + 1)
+            return
+          }
+          loadError.value = error
+          loadStatus.value = 'error'
+        }
+      }
+
+      expose(
+        new Proxy(
+          {},
+          {
+            get(_target, key) {
+              const value = childRef.value?.[key]
+              return typeof value === 'function' ? value.bind(childRef.value) : value
+            }
+          }
+        )
+      )
+
+      onMounted(() => {
+        loadComponent()
+      })
+
+      onUnmounted(() => {
+        isAlive = false
+      })
+
+      return () => {
+        if (loadStatus.value === 'ready' && loadedComponent.value) {
+          return h(loadedComponent.value, { ...attrs, ref: childRef }, slots)
+        }
+
+        if (loadStatus.value === 'error') {
+          return h(AsyncModalError, {
+            errorMessage: loadError.value?.message || '请检查网络后重试',
+            onClose: closeFallback,
+            onRetry: () => loadComponent()
+          })
+        }
+
+        return h(AsyncModalLoading)
+      }
+    }
+  })
+
+const createAsyncSectionComponent = (loader, loadingMessage) =>
+  defineComponent({
+    inheritAttrs: false,
+    setup(_props, { attrs, slots }) {
+      const loadedComponent = shallowRef(null)
+      const loadStatus = ref('loading')
+      const loadError = ref(null)
+      let isAlive = true
+
+      const loadComponent = async (attempt = 1) => {
+        loadStatus.value = 'loading'
+        loadError.value = null
+
+        try {
+          const mod = await loader()
+          if (!isAlive) return
+          loadedComponent.value = markRaw(mod.default || mod)
+          loadStatus.value = 'ready'
+        } catch (error) {
+          if (!isAlive) return
+          if (attempt < 2) {
+            loadComponent(attempt + 1)
+            return
+          }
+          loadError.value = error
+          loadStatus.value = 'error'
+        }
+      }
+
+      onMounted(() => {
+        loadComponent()
+      })
+
+      onUnmounted(() => {
+        isAlive = false
+      })
+
+      return () => {
+        if (loadStatus.value === 'ready' && loadedComponent.value) {
+          return h(loadedComponent.value, attrs, slots)
+        }
+
+        if (loadStatus.value === 'error') {
+          return h(AsyncSectionError, {
+            errorMessage: loadError.value?.message || '请检查网络后重试',
+            onRetry: () => loadComponent()
+          })
+        }
+
+        return h(AsyncSectionLoading, {
+          message: loadingMessage
+        })
+      }
+    }
+  })
+
+const ProxyConfig = createAsyncSectionComponent(
+  () => import('./ProxyConfig.vue'),
+  '代理配置加载中...'
+)
+const OAuthFlow = createAsyncOverlayComponent(() => import('./OAuthFlow.vue'))
+const GroupManagementModal = createAsyncOverlayComponent(() => import('./GroupManagementModal.vue'))
+const ApiKeyManagementModal = createAsyncOverlayComponent(
+  () => import('./ApiKeyManagementModal.vue')
+)
 
 const props = defineProps({
   account: {
