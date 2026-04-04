@@ -95,6 +95,29 @@
               <p class="mt-1.5 text-xs text-gray-500 dark:text-gray-400">
                 格式: 分 时 日 月 周 (例: "0 8 * * *" = 每天8:00)
               </p>
+
+              <div
+                v-if="cronPreview.nextRuns.length > 0"
+                class="mt-3 rounded-lg border border-blue-100 bg-blue-50/60 p-3 dark:border-blue-900/60 dark:bg-blue-950/20"
+              >
+                <div class="mb-2 flex items-center justify-between">
+                  <p class="text-sm font-medium text-blue-800 dark:text-blue-200">
+                    未来 8 次执行时间
+                  </p>
+                  <span class="text-xs text-blue-600 dark:text-blue-300">
+                    {{ cronPreview.timezone }}
+                  </span>
+                </div>
+                <div class="space-y-1">
+                  <div
+                    v-for="(runAt, index) in cronPreview.nextRuns"
+                    :key="`${runAt}-${index}`"
+                    class="text-xs text-blue-700 dark:text-blue-300"
+                  >
+                    {{ index + 1 }}. {{ formatScheduleTimestamp(runAt, cronPreview.timezone) }}
+                  </div>
+                </div>
+              </div>
             </div>
 
             <!-- 快捷选项 -->
@@ -239,6 +262,10 @@ const emit = defineEmits(['close', 'saved'])
 const loading = ref(false)
 const saving = ref(false)
 const testingCron = ref(false)
+const cronPreview = ref({
+  timezone: '',
+  nextRuns: []
+})
 const config = ref({
   enabled: false,
   cronExpression: '0 8 * * *',
@@ -315,6 +342,21 @@ function formatTimestamp(timestamp) {
     day: '2-digit',
     hour: '2-digit',
     minute: '2-digit'
+  })
+}
+
+function formatScheduleTimestamp(timestamp, timezone) {
+  if (!timestamp) return '未知'
+
+  return new Date(timestamp).toLocaleString('zh-CN', {
+    timeZone: timezone || 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false
   })
 }
 
@@ -462,12 +504,24 @@ async function testCronExpression() {
 
     const data = await res.json().catch(() => ({}))
     if (res.ok && data.success) {
+      cronPreview.value = {
+        timezone: data.data?.timezone || 'Asia/Shanghai',
+        nextRuns: Array.isArray(data.data?.nextRuns) ? data.data.nextRuns : []
+      }
       showToast(data.message || 'Cron 表达式可用', 'success')
       return
     }
 
+    cronPreview.value = {
+      timezone: '',
+      nextRuns: []
+    }
     showToast(data.message || 'Cron 表达式无效', 'error')
   } catch (err) {
+    cronPreview.value = {
+      timezone: '',
+      nextRuns: []
+    }
     showToast('测试失败: ' + err.message, 'error')
   } finally {
     testingCron.value = false
@@ -487,8 +541,22 @@ watch(
     if (newVal) {
       config.value = createDefaultConfig(props.account)
       testHistory.value = []
+      cronPreview.value = {
+        timezone: '',
+        nextRuns: []
+      }
       await loadModels()
       loadConfig()
+    }
+  }
+)
+
+watch(
+  () => config.value.cronExpression,
+  () => {
+    cronPreview.value = {
+      timezone: '',
+      nextRuns: []
     }
   }
 )

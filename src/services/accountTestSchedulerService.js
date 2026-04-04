@@ -4,8 +4,14 @@
  */
 
 const cron = require('node-cron')
+const path = require('path')
 const redis = require('../models/redis')
 const logger = require('../utils/logger')
+
+const { TimeMatcher } = require(path.join(
+  path.dirname(require.resolve('node-cron')),
+  'time/time-matcher.js'
+))
 
 class AccountTestSchedulerService {
   constructor() {
@@ -31,6 +37,39 @@ class AccountTestSchedulerService {
       return false
     }
     return cron.validate(cronExpression)
+  }
+
+  /**
+   * 获取未来执行时间
+   * @param {string} cronExpression - cron 表达式
+   * @param {number} count - 返回数量
+   * @param {string} timezone - 时区
+   * @returns {{timezone: string, nextRuns: string[]}}
+   */
+  getNextExecutionTimes(cronExpression, count = 8, timezone = process.env.TZ || 'Asia/Shanghai') {
+    if (!this.validateCronExpression(cronExpression)) {
+      throw new Error(`Invalid cron expression: ${cronExpression}`)
+    }
+
+    const matcher = new TimeMatcher(cronExpression, timezone)
+    const nextRuns = []
+    let cursor = new Date()
+    cursor.setMilliseconds(0)
+
+    for (let i = 0; i < count; i += 1) {
+      const nextRun = matcher.getNextMatch(cursor)
+      if (!(nextRun instanceof Date) || Number.isNaN(nextRun.getTime())) {
+        break
+      }
+
+      nextRuns.push(nextRun.toISOString())
+      cursor = new Date(nextRun.getTime() + 1000)
+    }
+
+    return {
+      timezone,
+      nextRuns
+    }
   }
 
   /**

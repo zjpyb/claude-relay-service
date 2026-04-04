@@ -1137,11 +1137,15 @@ router.post('/claude-accounts/:accountId/test-cron', authenticateAdmin, async (r
       })
     }
 
+    const schedulePreview = accountTestSchedulerService.getNextExecutionTimes(cronExpression, 8)
+
     return res.json({
       success: true,
       message: `Cron 表达式有效，将按 ${process.env.TZ || 'Asia/Shanghai'} 时区调度执行`,
       data: {
-        cronExpression
+        cronExpression,
+        timezone: schedulePreview.timezone,
+        nextRuns: schedulePreview.nextRuns
       }
     })
   } catch (error) {
