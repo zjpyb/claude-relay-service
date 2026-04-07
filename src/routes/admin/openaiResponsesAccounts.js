@@ -793,7 +793,7 @@ router.post(
 // 测试 OpenAI-Responses 账户连通性
 router.post('/openai-responses-accounts/:accountId/test', authenticateAdmin, async (req, res) => {
   const { accountId } = req.params
-  const { model = 'gpt-4o-mini' } = req.body
+  const { model = 'gpt-5.4' } = req.body
   const startTime = Date.now()
   let account = null
 

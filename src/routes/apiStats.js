@@ -1167,7 +1167,7 @@ router.post('/api-key/test-openai', async (req, res) => {
   const { createOpenAITestPayload } = require('../utils/testPayloadHelper')
 
   try {
-    const { apiKey, model = 'gpt-5', prompt = 'hi' } = req.body
+    const { apiKey, model = 'gpt-5.4', prompt = 'hi' } = req.body
     const maxTokens = sanitizeMaxTokens(req.body.maxTokens)
 
     if (!apiKey) {

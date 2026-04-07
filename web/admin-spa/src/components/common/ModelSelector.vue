@@ -8,7 +8,7 @@
       :value="modelValue"
       @change="handleSelectChange"
     >
-      <option v-for="m in models" :key="m.value" :value="m.value">
+      <option v-for="m in normalizedModels" :key="m.value" :value="m.value">
         {{ m.label }}
       </option>
       <option value="__custom__">自定义模型...</option>
@@ -37,7 +37,7 @@
 </template>
 
 <script setup>
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 
 const props = defineProps({
   modelValue: { type: String, default: '' },
@@ -49,6 +49,24 @@ const props = defineProps({
 const emit = defineEmits(['update:modelValue'])
 
 const customMode = ref(false)
+
+const normalizedModels = computed(() => {
+  const models = Array.isArray(props.models) ? [...props.models] : []
+  const currentValue = props.modelValue
+
+  if (
+    currentValue &&
+    currentValue !== '__custom__' &&
+    !models.some((item) => item?.value === currentValue)
+  ) {
+    models.unshift({
+      value: currentValue,
+      label: currentValue
+    })
+  }
+
+  return models
+})
 
 const handleSelectChange = (e) => {
   if (e.target.value === '__custom__') {
@@ -62,8 +80,8 @@ const handleSelectChange = (e) => {
 const exitCustomMode = () => {
   customMode.value = false
   // 切回列表时选中第一个预设模型
-  if (props.models.length > 0) {
-    emit('update:modelValue', props.models[0].value)
+  if (normalizedModels.value.length > 0) {
+    emit('update:modelValue', normalizedModels.value[0].value)
   }
 }
 </script>

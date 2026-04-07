@@ -334,7 +334,7 @@ const platformFallbackModels = {
   'claude-console': 'claude-sonnet-4-5-20250929',
   gemini: 'gemini-2.5-pro',
   'gemini-api': 'gemini-2.5-flash',
-  'openai-responses': 'gpt-5',
+  'openai-responses': 'gpt-5.4',
   droid: 'claude-sonnet-4-5-20250929',
   ccr: 'claude-sonnet-4-5-20250929'
 }
@@ -388,7 +388,7 @@ const apikeyServiceConfigs = {
   openai: {
     name: 'OpenAI (Codex)',
     endpoint: '/api-key/test-openai',
-    defaultModel: 'gpt-5',
+    defaultModel: 'gpt-5.4',
     displayEndpoint: '/openai/responses'
   }
 }

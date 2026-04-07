@@ -277,7 +277,7 @@ function createGeminiTestPayload(_model = 'gemini-2.5-pro', options = {}) {
  * @param {number} options.maxTokens - 最大输出 token（默认 100）
  * @returns {object} 测试请求体
  */
-function createOpenAITestPayload(model = 'gpt-5', options = {}) {
+function createOpenAITestPayload(model = 'gpt-5.4', options = {}) {
   const { prompt = 'hi', maxTokens = 100, stream = true } = options
   return {
     model,
