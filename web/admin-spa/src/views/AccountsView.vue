@@ -4115,11 +4115,18 @@ watch([paginatedAccountIdsSignature, shouldShowCheckboxes, isDesktopViewport], (
   updateSelectAllState()
   // 数据变化后重新检测是否需要横向滚动
   if (isDesktopViewport.value) {
-    nextTick(() => {
-      checkHorizontalScroll()
-    })
+    scheduleHorizontalScrollCheck()
   }
 })
+
+watch(
+  () => [accountsLoading.value, paginatedAccounts.value.length],
+  () => {
+    if (isDesktopViewport.value) {
+      scheduleHorizontalScrollCheck()
+    }
+  }
+)
 
 // 到期时间相关方法
 const formatExpireDate = (dateString) => {
@@ -4289,6 +4296,30 @@ const handleSaveAccountExpiry = async ({ accountId, expiresAt }) => {
   }
 }
 
+const scheduleHorizontalScrollCheck = () => {
+  if (!isDesktopViewport.value) {
+    needsHorizontalScroll.value = false
+    return
+  }
+
+  if (horizontalScrollCheckScheduled) {
+    return
+  }
+
+  horizontalScrollCheckScheduled = true
+  nextTick(() => {
+    checkHorizontalScroll()
+    if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
+      window.requestAnimationFrame(() => {
+        checkHorizontalScroll()
+        horizontalScrollCheckScheduled = false
+      })
+    } else {
+      horizontalScrollCheckScheduled = false
+    }
+  })
+}
+
 // 检测表格是否需要横向滚动
 const checkHorizontalScroll = () => {
   if (tableContainerRef.value) {
@@ -4307,7 +4338,9 @@ const syncViewportState = () => {
 
 // 窗口大小变化时重新检测
 let resizeObserver = null
+let tableMutationObserver = null
 let autoRecoveryTimer = null
+let horizontalScrollCheckScheduled = false
 
 onMounted(() => {
   // 首次加载时强制刷新所有数据
@@ -4345,7 +4378,17 @@ onMounted(() => {
         checkHorizontalScroll()
       })
       resizeObserver.observe(tableContainerRef.value)
-      checkHorizontalScroll()
+
+      tableMutationObserver = new MutationObserver(() => {
+        scheduleHorizontalScrollCheck()
+      })
+      tableMutationObserver.observe(tableContainerRef.value, {
+        childList: true,
+        subtree: true,
+        characterData: true
+      })
+
+      scheduleHorizontalScrollCheck()
     }
   })
 
@@ -4357,6 +4400,10 @@ onMounted(() => {
 onUnmounted(() => {
   if (resizeObserver) {
     resizeObserver.disconnect()
+  }
+  if (tableMutationObserver) {
+    tableMutationObserver.disconnect()
+    tableMutationObserver = null
   }
   if (autoRecoveryTimer) {
     clearInterval(autoRecoveryTimer)
@@ -4513,10 +4560,12 @@ onUnmounted(() => {
 
 /* 操作列左侧阴影 */
 .table-container tbody .operations-column {
+  background: rgba(255, 255, 255, 0.98);
   box-shadow: -8px 0 12px -8px rgba(15, 23, 42, 0.16);
 }
 
 .dark .table-container tbody .operations-column {
+  background: rgba(31, 41, 55, 0.98);
   box-shadow: -8px 0 12px -8px rgba(30, 41, 59, 0.45);
 }
 </style>
