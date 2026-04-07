@@ -1658,48 +1658,46 @@ const handleBalanceScriptSaved = async () => {
   }
 }
 
-// 计算排序后的账户列表
-const sortedAccounts = computed(() => {
-  let sourceAccounts = accounts.value
+const normalizedSearchKeyword = computed(() => searchKeyword.value.trim().toLowerCase())
 
-  const keyword = searchKeyword.value.trim()
-  if (keyword) {
-    const normalizedKeyword = keyword.toLowerCase()
-    sourceAccounts = sourceAccounts.filter((account) =>
-      accountMatchesKeyword(account, normalizedKeyword)
-    )
+const matchesStatusFilter = (account, filterValue) => {
+  if (filterValue === 'all') {
+    return true
   }
 
-  // 状态过滤 (normal/unschedulable/rateLimited/other/all)
-  // 限流: isActive && rate-limited (最高优先级)
-  // 正常: isActive && !rate-limited && !blocked && schedulable
-  // 不可调度: isActive && !rate-limited && !blocked && schedulable === false
-  // 其他: 非限流的（未激活 || 被阻止）
-  if (statusFilter.value !== 'all') {
-    sourceAccounts = sourceAccounts.filter((account) => {
-      const isRateLimited = isAccountRateLimited(account)
-      const isBlocked = account.status === 'blocked' || account.status === 'unauthorized'
+  const rateLimited = isAccountRateLimited(account)
+  const blocked = account.status === 'blocked' || account.status === 'unauthorized'
 
-      if (statusFilter.value === 'rateLimited') {
-        // 限流: 激活且限流中（优先判断）
-        return account.isActive && isRateLimited
-      } else if (statusFilter.value === 'normal') {
-        // 正常: 激活且非限流且非阻止且可调度
-        return account.isActive && !isRateLimited && !isBlocked && account.schedulable !== false
-      } else if (statusFilter.value === 'unschedulable') {
-        // 不可调度: 激活且非限流且非阻止但不可调度
-        return account.isActive && !isRateLimited && !isBlocked && account.schedulable === false
-      } else if (statusFilter.value === 'other') {
-        // 其他: 非限流的异常账户（未激活或被阻止）
-        return !isRateLimited && (!account.isActive || isBlocked)
-      }
-      return true
-    })
+  if (filterValue === 'rateLimited') {
+    // 限流: 激活且限流中（优先判断）
+    return account.isActive && rateLimited
   }
 
-  if (!accountsSortBy.value) return sourceAccounts
+  if (filterValue === 'normal') {
+    // 正常: 激活且非限流且非阻止且可调度
+    return account.isActive && !rateLimited && !blocked && account.schedulable !== false
+  }
 
-  const sorted = [...sourceAccounts].sort((a, b) => {
+  if (filterValue === 'unschedulable') {
+    // 不可调度: 激活且非限流且非阻止但不可调度
+    return account.isActive && !rateLimited && !blocked && account.schedulable === false
+  }
+
+  if (filterValue === 'other') {
+    // 其他: 非限流的异常账户（未激活或被阻止）
+    return !rateLimited && (!account.isActive || blocked)
+  }
+
+  return true
+}
+
+const sortedAccountsBase = computed(() => {
+  const sourceAccounts = accounts.value
+  if (!accountsSortBy.value) {
+    return sourceAccounts
+  }
+
+  return [...sourceAccounts].sort((a, b) => {
     let aVal = a[accountsSortBy.value]
     let bVal = b[accountsSortBy.value]
 
@@ -1748,8 +1746,25 @@ const sortedAccounts = computed(() => {
     if (aVal > bVal) return accountsSortOrder.value === 'asc' ? 1 : -1
     return 0
   })
+})
 
-  return sorted
+// 搜索/状态过滤基于已排序列表执行，避免每次搜索输入都重新全量排序
+const sortedAccounts = computed(() => {
+  let sourceAccounts = sortedAccountsBase.value
+
+  if (normalizedSearchKeyword.value) {
+    sourceAccounts = sourceAccounts.filter((account) =>
+      accountMatchesKeyword(account, normalizedSearchKeyword.value)
+    )
+  }
+
+  if (statusFilter.value !== 'all') {
+    sourceAccounts = sourceAccounts.filter((account) =>
+      matchesStatusFilter(account, statusFilter.value)
+    )
+  }
+
+  return sourceAccounts
 })
 
 const totalPages = computed(() => {
@@ -4052,13 +4067,18 @@ watch(searchInputKeyword, (value) => {
     searchDebounceTimer = null
   }
 
-  if (!value.trim()) {
-    searchKeyword.value = ''
+  const trimmedKeyword = value.trim()
+  if (!trimmedKeyword) {
+    if (searchKeyword.value) {
+      searchKeyword.value = ''
+    }
     return
   }
 
   searchDebounceTimer = setTimeout(() => {
-    searchKeyword.value = value
+    if (searchKeyword.value !== trimmedKeyword) {
+      searchKeyword.value = trimmedKeyword
+    }
     searchDebounceTimer = null
   }, SEARCH_DEBOUNCE_MS)
 })
