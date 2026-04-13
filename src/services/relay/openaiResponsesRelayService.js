@@ -71,12 +71,22 @@ class OpenAIResponsesRelayService {
     let concurrencyAcquired = false
     let leaseRefreshInterval = null
     let fullAccount = null
+    let clientDisconnected = false
+    let releaseConcurrency = async () => {}
+    let handleClientDisconnect = () => {}
+    let handleResponseClose = () => {}
     const requestId = uuidv4()
     // 获取会话哈希（如果有的话）
     const sessionId = req.headers['session_id'] || req.body?.session_id
     const sessionHash = sessionId
       ? crypto.createHash('sha256').update(sessionId).digest('hex')
       : null
+    const isClientDisconnected = () =>
+      clientDisconnected ||
+      req.aborted ||
+      res.destroyed ||
+      res.writableEnded ||
+      Boolean(abortController?.signal?.aborted)
 
     try {
       // 获取完整的账户信息（包含解密的 API Key）
@@ -85,7 +95,7 @@ class OpenAIResponsesRelayService {
         throw new Error('Account not found')
       }
 
-      const releaseConcurrency = async () => {
+      releaseConcurrency = async () => {
         if (!concurrencyAcquired) {
           return
         }
@@ -110,7 +120,8 @@ class OpenAIResponsesRelayService {
       abortController = new AbortController()
 
       // 设置客户端断开监听器
-      const handleClientDisconnect = () => {
+      handleClientDisconnect = () => {
+        clientDisconnected = true
         logger.info('🔌 Client disconnected, aborting OpenAI-Responses request')
         if (abortController && !abortController.signal.aborted) {
           abortController.abort()
@@ -120,14 +131,15 @@ class OpenAIResponsesRelayService {
         })
       }
 
+      handleResponseClose = () => {
+        if (!res.writableEnded) {
+          handleClientDisconnect()
+        }
+      }
+
       // 监听客户端断开事件
-      req.once('close', handleClientDisconnect)
-      res.once('close', handleClientDisconnect)
-      req.once('aborted', () => {
-        releaseConcurrency().catch((error) => {
-          logger.error('Failed to cleanup OpenAI-Responses concurrency on abort:', error)
-        })
-      })
+      req.once('aborted', handleClientDisconnect)
+      res.once('close', handleResponseClose)
       req.once('error', () => {
         releaseConcurrency().catch((error) => {
           logger.error('Failed to cleanup OpenAI-Responses concurrency on request error:', error)
@@ -143,6 +155,13 @@ class OpenAIResponsesRelayService {
           logger.error('Failed to cleanup OpenAI-Responses concurrency on response error:', error)
         })
       })
+
+      if (isClientDisconnected()) {
+        logger.info(
+          `🔌 Skip OpenAI-Responses relay before acquire because client already disconnected (account: ${account.id}, request: ${requestId})`
+        )
+        return res
+      }
 
       const maxConcurrentTasks = Number(fullAccount.maxConcurrentTasks || 0)
       if (maxConcurrentTasks > 0) {
@@ -173,6 +192,14 @@ class OpenAIResponsesRelayService {
           `🔓 Acquired OpenAI-Responses concurrency slot for account ${account.name} (${account.id}), current: ${newConcurrency}/${maxConcurrentTasks}, request: ${requestId}`
         )
 
+        if (isClientDisconnected()) {
+          logger.info(
+            `🔌 Releasing OpenAI-Responses concurrency immediately because client disconnected after acquire (account: ${account.id}, request: ${requestId})`
+          )
+          await releaseConcurrency()
+          return res
+        }
+
         if (req.body?.stream) {
           leaseRefreshInterval = setInterval(
             async () => {
@@ -192,6 +219,14 @@ class OpenAIResponsesRelayService {
             5 * 60 * 1000
           )
         }
+      }
+
+      if (isClientDisconnected()) {
+        logger.info(
+          `🔌 Skip OpenAI-Responses upstream request because client already disconnected (account: ${account.id}, request: ${requestId})`
+        )
+        await releaseConcurrency()
+        return res
       }
 
       // 构建目标 URL（根据 providerEndpoint 配置决定端点路径）
@@ -495,8 +530,8 @@ class OpenAIResponsesRelayService {
               }
             }
 
-            req.removeListener('close', handleClientDisconnect)
-            res.removeListener('close', handleClientDisconnect)
+            req.removeListener('aborted', handleClientDisconnect)
+            res.removeListener('close', handleResponseClose)
 
             return res.status(402).json(this._buildDailyQuotaExceededPayload(errorData, resetAt))
           } catch (markError) {
@@ -659,8 +694,8 @@ class OpenAIResponsesRelayService {
           }
 
           // 清理监听器
-          req.removeListener('close', handleClientDisconnect)
-          res.removeListener('close', handleClientDisconnect)
+          req.removeListener('aborted', handleClientDisconnect)
+          res.removeListener('close', handleResponseClose)
 
           return res.status(401).json(unauthorizedResponse)
         }
@@ -675,13 +710,15 @@ class OpenAIResponsesRelayService {
               await upstreamErrorHelper
                 .markTempUnavailable(account.id, 'openai-responses', 403)
                 .catch(() => {})
-              this._probeTemporaryRecovery(fullAccount || account, req.body?.model, '403错误').catch(
-                (probeError) => {
-                  logger.warn(
-                    `Failed to probe OpenAI-Responses account availability after 403 for ${account.id}: ${probeError.message}`
-                  )
-                }
-              )
+              this._probeTemporaryRecovery(
+                fullAccount || account,
+                req.body?.model,
+                '403错误'
+              ).catch((probeError) => {
+                logger.warn(
+                  `Failed to probe OpenAI-Responses account availability after 403 for ${account.id}: ${probeError.message}`
+                )
+              })
             }
             if (sessionHash) {
               await unifiedOpenAIScheduler._deleteSessionMapping(sessionHash).catch(() => {})
@@ -781,8 +818,8 @@ class OpenAIResponsesRelayService {
         }
 
         // 清理监听器
-        req.removeListener('close', handleClientDisconnect)
-        res.removeListener('close', handleClientDisconnect)
+        req.removeListener('aborted', handleClientDisconnect)
+        res.removeListener('close', handleResponseClose)
 
         return res
           .status(response.status)
@@ -813,6 +850,16 @@ class OpenAIResponsesRelayService {
         abortController.abort()
       }
 
+      await releaseConcurrency().catch((releaseError) => {
+        logger.error(
+          `Failed to cleanup OpenAI-Responses concurrency in catch handler for ${account?.id}:`,
+          releaseError
+        )
+      })
+
+      req.removeListener('aborted', handleClientDisconnect)
+      res.removeListener('close', handleResponseClose)
+
       // 安全地记录错误，避免循环引用
       const errorInfo = {
         message: error.message,
@@ -821,6 +868,13 @@ class OpenAIResponsesRelayService {
         statusText: error.response?.statusText
       }
       logger.error('OpenAI-Responses relay error:', errorInfo)
+
+      if (isClientDisconnected()) {
+        logger.info(
+          `🔌 OpenAI-Responses relay aborted after client disconnect (account: ${account?.id}, request: ${requestId})`
+        )
+        return res
+      }
 
       // 检查是否是网络错误
       if (error.code === 'ECONNREFUSED' || error.code === 'ETIMEDOUT') {
@@ -950,12 +1004,17 @@ class OpenAIResponsesRelayService {
 
         if (isDailyQuotaExceeded && account?.id) {
           try {
-            const { resetAt } = await this._markQuotaExceededUntilReset(account, status, errorData, {
-              model: req.body?.model,
-              path: req.originalUrl,
-              sessionHash,
-              sourceLabel: '上游明确返回日额度耗尽'
-            })
+            const { resetAt } = await this._markQuotaExceededUntilReset(
+              account,
+              status,
+              errorData,
+              {
+                model: req.body?.model,
+                path: req.originalUrl,
+                sessionHash,
+                sourceLabel: '上游明确返回日额度耗尽'
+              }
+            )
 
             const retryCount = Number(req._openaiResponses429RetryCount || 0)
             if (retryCount < 3) {
@@ -1083,13 +1142,15 @@ class OpenAIResponsesRelayService {
               await upstreamErrorHelper
                 .markTempUnavailable(account.id, 'openai-responses', 403)
                 .catch(() => {})
-              this._probeTemporaryRecovery(fullAccount || account, req.body?.model, '403错误').catch(
-                (probeError) => {
-                  logger.warn(
-                    `Failed to probe OpenAI-Responses account availability after 403 in catch handler for ${account.id}: ${probeError.message}`
-                  )
-                }
-              )
+              this._probeTemporaryRecovery(
+                fullAccount || account,
+                req.body?.model,
+                '403错误'
+              ).catch((probeError) => {
+                logger.warn(
+                  `Failed to probe OpenAI-Responses account availability after 403 in catch handler for ${account.id}: ${probeError.message}`
+                )
+              })
             }
             if (sessionHash) {
               await unifiedOpenAIScheduler._deleteSessionMapping(sessionHash).catch(() => {})
@@ -1398,7 +1459,9 @@ class OpenAIResponsesRelayService {
             )
           })
 
-          logger.warn(`🚫 Processing quota-like 429 for OpenAI-Responses account ${account.id} from stream`)
+          logger.warn(
+            `🚫 Processing quota-like 429 for OpenAI-Responses account ${account.id} from stream`
+          )
         } else {
           const historyContext = {
             model: req.body?.model,
@@ -1420,13 +1483,15 @@ class OpenAIResponsesRelayService {
             )
           })
 
-          logger.warn(`🚫 Processing temporary 429 for OpenAI-Responses account ${account.id} from stream`)
+          logger.warn(
+            `🚫 Processing temporary 429 for OpenAI-Responses account ${account.id} from stream`
+          )
         }
       }
 
       // 清理监听器
-      req.removeListener('close', handleClientDisconnect)
-      res.removeListener('close', handleClientDisconnect)
+      req.removeListener('aborted', handleClientDisconnect)
+      res.removeListener('close', handleResponseClose)
 
       if (!res.destroyed) {
         res.end()
@@ -1444,8 +1509,8 @@ class OpenAIResponsesRelayService {
       logger.error('Stream error:', error)
 
       // 清理监听器
-      req.removeListener('close', handleClientDisconnect)
-      res.removeListener('close', handleClientDisconnect)
+      req.removeListener('aborted', handleClientDisconnect)
+      res.removeListener('close', handleResponseClose)
 
       if (!res.headersSent) {
         res.status(502).json({ error: { message: 'Upstream stream error' } })
@@ -1763,7 +1828,9 @@ class OpenAIResponsesRelayService {
         chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)))
         const currentSize = chunks.reduce((sum, item) => sum + item.length, 0)
         if (currentSize >= 16 * 1024) {
-          finalize(this._formatProbeFailureMessage(response.status, Buffer.concat(chunks).toString()))
+          finalize(
+            this._formatProbeFailureMessage(response.status, Buffer.concat(chunks).toString())
+          )
         }
       })
 
@@ -1867,7 +1934,9 @@ class OpenAIResponsesRelayService {
         }
       }
 
-      logger.info(`🧪 Testing OpenAI-Responses account connection (sync): ${account.name} (${accountId})`)
+      logger.info(
+        `🧪 Testing OpenAI-Responses account connection (sync): ${account.name} (${accountId})`
+      )
 
       response = await axios.post(apiUrl, payload, requestConfig)
       if (response.status < 200 || response.status >= 400) {
@@ -1937,7 +2006,9 @@ class OpenAIResponsesRelayService {
 
     const isUpstreamSchedulerRateLimit = this._isUpstreamSchedulerRateLimit(status, errorData)
     if (isUpstreamSchedulerRateLimit) {
-      logger.warn(`🚫 OpenAI Responses测试触发模型不可路由，已临时暂停并后台探测 for account ${account.id}`)
+      logger.warn(
+        `🚫 OpenAI Responses测试触发模型不可路由，已临时暂停并后台探测 for account ${account.id}`
+      )
 
       await upstreamErrorHelper
         .recordErrorHistory(account.id, 'openai-responses', status, 'unroutable_model', {
@@ -2017,7 +2088,9 @@ class OpenAIResponsesRelayService {
 
     if (status === 401 && !oaiAutoProtectionDisabled) {
       logger.warn(`🚫 OpenAI Responses测试触发401临时暂停 for account ${account.id}`)
-      await upstreamErrorHelper.markTempUnavailable(account.id, 'openai-responses', 401).catch(() => {})
+      await upstreamErrorHelper
+        .markTempUnavailable(account.id, 'openai-responses', 401)
+        .catch(() => {})
       this._probeUnauthorized401Recovery(account, model).catch((probeError) => {
         logger.warn(
           `Failed to probe OpenAI-Responses account availability after test 401 for ${account.id}: ${probeError.message}`
@@ -2028,7 +2101,9 @@ class OpenAIResponsesRelayService {
 
     if (status === 403 && !oaiAutoProtectionDisabled) {
       logger.warn(`🚫 OpenAI Responses测试触发403临时暂停 for account ${account.id}`)
-      await upstreamErrorHelper.markTempUnavailable(account.id, 'openai-responses', 403).catch(() => {})
+      await upstreamErrorHelper
+        .markTempUnavailable(account.id, 'openai-responses', 403)
+        .catch(() => {})
       this._probeTemporaryRecovery(account, model, '403错误').catch((probeError) => {
         logger.warn(
           `Failed to probe OpenAI-Responses account availability after test 403 for ${account.id}: ${probeError.message}`
@@ -2039,7 +2114,9 @@ class OpenAIResponsesRelayService {
 
     if (status >= 500 && !oaiAutoProtectionDisabled) {
       logger.warn(`🚫 OpenAI Responses测试触发${status}临时暂停 for account ${account.id}`)
-      await upstreamErrorHelper.markTempUnavailable(account.id, 'openai-responses', status).catch(() => {})
+      await upstreamErrorHelper
+        .markTempUnavailable(account.id, 'openai-responses', status)
+        .catch(() => {})
       this._probeTemporaryRecovery(account, model, `${status} 上游错误`).catch((probeError) => {
         logger.warn(
           `Failed to probe OpenAI-Responses account availability after test ${status} for ${account.id}: ${probeError.message}`
@@ -2086,8 +2163,8 @@ class OpenAIResponsesRelayService {
       `🔁 OpenAI-Responses账户 ${currentAccount.id} 命中${reasonLabel}，第 ${retryCount} 次立即重试到账户 ${retryAccount.id}`
     )
 
-    req.removeListener('close', handleClientDisconnect)
-    res.removeListener('close', handleClientDisconnect)
+    req.removeListener('aborted', handleClientDisconnect)
+    res.removeListener('close', handleResponseClose)
     await releaseConcurrency().catch(() => {})
 
     await this.handleRequest(req, res, retryAccount, apiKeyData)
@@ -2150,15 +2227,21 @@ class OpenAIResponsesRelayService {
           .clearTempUnavailable(account.id, 'openai-responses')
           .catch(() => {})
 
-        logger.warn(`✅ OpenAI-Responses账户 ${account.id} 在${reasonLabel}后探测可用，已自动恢复调度状态`)
+        logger.warn(
+          `✅ OpenAI-Responses账户 ${account.id} 在${reasonLabel}后探测可用，已自动恢复调度状态`
+        )
         return true
       }
 
-      logger.info(`🧪 OpenAI-Responses账户 ${account.id} ${reasonLabel}后探测仍不可用: status=${response.status}`)
+      logger.info(
+        `🧪 OpenAI-Responses账户 ${account.id} ${reasonLabel}后探测仍不可用: status=${response.status}`
+      )
       return false
     } catch (error) {
       const message = extractErrorMessage(error.response?.data, error.message)
-      logger.info(`🧪 OpenAI-Responses账户 ${account.id} ${reasonLabel}后探测失败，保留暂停状态: ${message}`)
+      logger.info(
+        `🧪 OpenAI-Responses账户 ${account.id} ${reasonLabel}后探测失败，保留暂停状态: ${message}`
+      )
       return false
     } finally {
       response?.data?.destroy?.()
