@@ -358,6 +358,7 @@ class OpenAIResponsesRelayService {
                 apiKeyData,
                 sessionHash,
                 handleClientDisconnect,
+                handleResponseClose,
                 releaseConcurrency,
                 {
                   reasonLabel: '429 配额型错误',
@@ -408,6 +409,7 @@ class OpenAIResponsesRelayService {
               apiKeyData,
               sessionHash,
               handleClientDisconnect,
+              handleResponseClose,
               releaseConcurrency,
               {
                 reasonLabel: '429',
@@ -513,6 +515,7 @@ class OpenAIResponsesRelayService {
                   apiKeyData,
                   sessionHash,
                   handleClientDisconnect,
+                  handleResponseClose,
                   releaseConcurrency,
                   {
                     reasonLabel: `${response.status} 配额型错误`,
@@ -602,6 +605,7 @@ class OpenAIResponsesRelayService {
                 apiKeyData,
                 sessionHash,
                 handleClientDisconnect,
+                handleResponseClose,
                 releaseConcurrency,
                 {
                   reasonLabel: `${response.status} 模型不可路由`,
@@ -659,6 +663,7 @@ class OpenAIResponsesRelayService {
                 apiKeyData,
                 sessionHash,
                 handleClientDisconnect,
+                handleResponseClose,
                 releaseConcurrency,
                 {
                   reasonLabel: '401 认证错误',
@@ -741,6 +746,7 @@ class OpenAIResponsesRelayService {
                 apiKeyData,
                 sessionHash,
                 handleClientDisconnect,
+                handleResponseClose,
                 releaseConcurrency,
                 {
                   reasonLabel: '403 错误',
@@ -800,6 +806,7 @@ class OpenAIResponsesRelayService {
                 apiKeyData,
                 sessionHash,
                 handleClientDisconnect,
+                handleResponseClose,
                 releaseConcurrency,
                 {
                   reasonLabel: `${response.status} 上游错误`,
@@ -838,6 +845,7 @@ class OpenAIResponsesRelayService {
           apiKeyData,
           req.body?.model,
           handleClientDisconnect,
+          handleResponseClose,
           req
         )
       }
@@ -911,6 +919,7 @@ class OpenAIResponsesRelayService {
               apiKeyData,
               sessionHash,
               handleClientDisconnect,
+              handleResponseClose,
               releaseConcurrency,
               {
                 reasonLabel: '传输层上游错误',
@@ -1009,6 +1018,7 @@ class OpenAIResponsesRelayService {
                 apiKeyData,
                 sessionHash,
                 handleClientDisconnect,
+                handleResponseClose,
                 releaseConcurrency,
                 {
                   reasonLabel: '401 认证错误',
@@ -1074,6 +1084,7 @@ class OpenAIResponsesRelayService {
                   apiKeyData,
                   sessionHash,
                   handleClientDisconnect,
+                  handleResponseClose,
                   releaseConcurrency,
                   {
                     reasonLabel: `${status} 配额型错误`,
@@ -1160,6 +1171,7 @@ class OpenAIResponsesRelayService {
                 apiKeyData,
                 sessionHash,
                 handleClientDisconnect,
+                handleResponseClose,
                 releaseConcurrency,
                 {
                   reasonLabel: `${status} 模型不可路由`,
@@ -1220,6 +1232,7 @@ class OpenAIResponsesRelayService {
                 apiKeyData,
                 sessionHash,
                 handleClientDisconnect,
+                handleResponseClose,
                 releaseConcurrency,
                 {
                   reasonLabel: '403 错误',
@@ -1276,6 +1289,7 @@ class OpenAIResponsesRelayService {
                 apiKeyData,
                 sessionHash,
                 handleClientDisconnect,
+                handleResponseClose,
                 releaseConcurrency,
                 {
                   reasonLabel: `${status} 上游错误`,
@@ -1315,6 +1329,7 @@ class OpenAIResponsesRelayService {
     apiKeyData,
     requestedModel,
     handleClientDisconnect,
+    handleResponseClose,
     req
   ) {
     // 设置 SSE 响应头
@@ -2203,6 +2218,7 @@ class OpenAIResponsesRelayService {
     apiKeyData,
     sessionHash,
     handleClientDisconnect,
+    handleResponseClose,
     releaseConcurrency,
     options = {}
   ) {
