@@ -876,17 +876,64 @@ class OpenAIResponsesRelayService {
         return res
       }
 
-      // 检查是否是网络错误
-      if (error.code === 'ECONNREFUSED' || error.code === 'ETIMEDOUT') {
-        if (account?.id) {
-          const oaiAutoProtectionDisabled =
-            account?.disableAutoProtection === true || account?.disableAutoProtection === 'true'
-          if (!oaiAutoProtectionDisabled) {
-            await upstreamErrorHelper
-              .markTempUnavailable(account.id, 'openai-responses', 503)
-              .catch(() => {})
+      // 检查是否是上游无响应的传输层异常
+      if (this._isRetryableTransportError(error) && account?.id) {
+        const oaiAutoProtectionDisabled =
+          account?.disableAutoProtection === true || account?.disableAutoProtection === 'true'
+
+        if (!oaiAutoProtectionDisabled) {
+          await upstreamErrorHelper
+            .markTempUnavailable(account.id, 'openai-responses', 503)
+            .catch(() => {})
+          this._probeTemporaryRecovery(
+            fullAccount || account,
+            req.body?.model,
+            '传输层上游错误'
+          ).catch((probeError) => {
+            logger.warn(
+              `Failed to probe OpenAI-Responses account availability after transport error for ${account.id}: ${probeError.message}`
+            )
+          })
+        }
+
+        if (sessionHash) {
+          await unifiedOpenAIScheduler._deleteSessionMapping(sessionHash).catch(() => {})
+        }
+
+        const retryCount = Number(req._openaiResponses429RetryCount || 0)
+        if (retryCount < 3) {
+          try {
+            req._openaiResponses429RetryCount = retryCount + 1
+            const retried = await this._retryUnavailableRequest(
+              req,
+              res,
+              account,
+              apiKeyData,
+              sessionHash,
+              handleClientDisconnect,
+              releaseConcurrency,
+              {
+                reasonLabel: '传输层上游错误',
+                retryCount: req._openaiResponses429RetryCount
+              }
+            )
+            if (retried) {
+              return res
+            }
+          } catch (retryError) {
+            logger.warn(
+              `Failed to retry OpenAI-Responses request after transport error for ${account.id}: ${retryError.message}`
+            )
           }
         }
+
+        return res.status(502).json({
+          error: {
+            message: error.message || 'Upstream transport error',
+            type: 'upstream_transport_error',
+            code: error.code || 'upstream_transport_error'
+          }
+        })
       }
 
       // 如果已经发送了响应头，直接结束
@@ -1752,6 +1799,30 @@ class OpenAIResponsesRelayService {
     const errorText = this._get429ErrorText(errorData)
     return /daily_limit_exceeded|usage_limit_exceeded|daily usage limit exceeded|the usage limit has been reached|当前订阅余额已用尽|余额已用尽|subscription.*余额|subscription balance|insufficient.*quota|额度不足|剩余额度/.test(
       errorText
+    )
+  }
+
+  _isRetryableTransportError(error) {
+    if (!error) {
+      return false
+    }
+
+    const code = String(error.code || '').toUpperCase()
+    const message = String(error.message || '').toLowerCase()
+
+    return (
+      [
+        'ECONNREFUSED',
+        'ETIMEDOUT',
+        'ECONNRESET',
+        'EPIPE',
+        'ENOTFOUND',
+        'EAI_AGAIN',
+        'ECONNABORTED'
+      ].includes(code) ||
+      message.includes('socket hang up') ||
+      message.includes('network error') ||
+      message.includes('timeout')
     )
   }
 
