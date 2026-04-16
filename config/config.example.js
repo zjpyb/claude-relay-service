@@ -110,6 +110,10 @@ const config = {
       parseInt(process.env.OPENAI_RESPONSES_STREAM_FIRST_BYTE_TIMEOUT_MS) || 15000, // 首包超时
     streamIdleTimeoutMs:
       parseInt(process.env.OPENAI_RESPONSES_STREAM_IDLE_TIMEOUT_MS) || 45000, // 流式空闲超时
+    slowSuccessThresholdMs:
+      parseInt(process.env.OPENAI_RESPONSES_SLOW_SUCCESS_THRESHOLD_MS) || 120000, // 成功但超慢时触发保护
+    slowSuccessCooldownSeconds:
+      parseInt(process.env.OPENAI_RESPONSES_SLOW_SUCCESS_COOLDOWN_SECONDS) || 900, // 慢成功后的临时暂停
     transportErrorCooldownSeconds:
       parseInt(process.env.OPENAI_RESPONSES_TRANSPORT_ERROR_COOLDOWN_SECONDS) || 300 // 传输层异常冷却
   },

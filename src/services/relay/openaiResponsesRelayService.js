@@ -63,6 +63,16 @@ class OpenAIResponsesRelayService {
         process.env.OPENAI_RESPONSES_STREAM_IDLE_TIMEOUT_MS,
       45000
     )
+    this.slowSuccessThresholdMs = parsePositiveIntWithFallback(
+      config.openaiResponses?.slowSuccessThresholdMs ||
+        process.env.OPENAI_RESPONSES_SLOW_SUCCESS_THRESHOLD_MS,
+      120000
+    )
+    this.slowSuccessCooldownSeconds = parsePositiveIntWithFallback(
+      config.openaiResponses?.slowSuccessCooldownSeconds ||
+        process.env.OPENAI_RESPONSES_SLOW_SUCCESS_COOLDOWN_SECONDS,
+      900
+    )
     this.transportErrorCooldownSeconds = parsePositiveIntWithFallback(
       config.openaiResponses?.transportErrorCooldownSeconds ||
         process.env.OPENAI_RESPONSES_TRANSPORT_ERROR_COOLDOWN_SECONDS,
@@ -336,6 +346,7 @@ class OpenAIResponsesRelayService {
       })
 
       // 发送请求
+      const relayStartedAt = Date.now()
       const response = await axios(requestOptions)
 
       // 处理 429 限流错误
@@ -867,10 +878,11 @@ class OpenAIResponsesRelayService {
         return this._handleStreamResponse(
           response,
           res,
-          account,
+          fullAccount || account,
           apiKeyData,
           req.body?.model,
           sessionHash,
+          relayStartedAt,
           releaseConcurrency,
           handleClientDisconnect,
           handleResponseClose,
@@ -894,6 +906,16 @@ class OpenAIResponsesRelayService {
           )
         }
       )
+      this._maybePauseSlowSuccessfulRequest(
+        fullAccount || account,
+        req.body?.model,
+        relayStartedAt,
+        'non-stream response'
+      ).catch((slowPauseError) => {
+        logger.warn(
+          `Failed to process slow-success protection for OpenAI-Responses account ${account.id}: ${slowPauseError.message}`
+        )
+      })
       return result
     } catch (error) {
       // 清理 AbortController
@@ -1377,6 +1399,7 @@ class OpenAIResponsesRelayService {
     apiKeyData,
     requestedModel,
     sessionHash,
+    relayStartedAt,
     releaseConcurrency,
     handleClientDisconnect,
     handleResponseClose,
@@ -1717,6 +1740,17 @@ class OpenAIResponsesRelayService {
         hasUsage: !!usageData,
         actualModel: actualModel || 'unknown'
       })
+
+      this._maybePauseSlowSuccessfulRequest(
+        account,
+        requestedModel,
+        relayStartedAt,
+        'stream response'
+      ).catch((slowPauseError) => {
+        logger.warn(
+          `Failed to process slow-success protection for OpenAI-Responses account ${account.id}: ${slowPauseError.message}`
+        )
+      })
     })
 
     response.data.on('error', (error) => {
@@ -1904,6 +1938,37 @@ class OpenAIResponsesRelayService {
         req._openaiResponsesSessionBinding = false
       }
     }
+  }
+
+  async _maybePauseSlowSuccessfulRequest(account, requestedModel, relayStartedAt, responseLabel) {
+    if (!account?.id || !Number.isFinite(relayStartedAt) || this.slowSuccessThresholdMs <= 0) {
+      return
+    }
+
+    const durationMs = Date.now() - relayStartedAt
+    if (durationMs < this.slowSuccessThresholdMs) {
+      return
+    }
+
+    logger.warn(
+      `🐢 OpenAI-Responses account ${account.id} completed ${responseLabel} slowly in ${durationMs}ms, marking temporary unavailable for ${this.slowSuccessCooldownSeconds}s`
+    )
+
+    const historyContext = {
+      model: requestedModel,
+      slowSuccessMs: durationMs,
+      responseLabel
+    }
+
+    await upstreamErrorHelper
+      .markTempUnavailable(
+        account.id,
+        'openai-responses',
+        504,
+        this.slowSuccessCooldownSeconds,
+        historyContext
+      )
+      .catch(() => {})
   }
 
   // 处理非流式响应
