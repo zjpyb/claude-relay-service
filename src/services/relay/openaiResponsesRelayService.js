@@ -45,9 +45,29 @@ function extractCacheCreationTokens(usageData) {
   return 0
 }
 
+function parsePositiveIntWithFallback(value, fallback) {
+  const parsed = Number.parseInt(value, 10)
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback
+}
+
 class OpenAIResponsesRelayService {
   constructor() {
     this.defaultTimeout = config.requestTimeout || 600000
+    this.streamFirstByteTimeoutMs = parsePositiveIntWithFallback(
+      config.openaiResponses?.streamFirstByteTimeoutMs ||
+        process.env.OPENAI_RESPONSES_STREAM_FIRST_BYTE_TIMEOUT_MS,
+      15000
+    )
+    this.streamIdleTimeoutMs = parsePositiveIntWithFallback(
+      config.openaiResponses?.streamIdleTimeoutMs ||
+        process.env.OPENAI_RESPONSES_STREAM_IDLE_TIMEOUT_MS,
+      45000
+    )
+    this.transportErrorCooldownSeconds = parsePositiveIntWithFallback(
+      config.openaiResponses?.transportErrorCooldownSeconds ||
+        process.env.OPENAI_RESPONSES_TRANSPORT_ERROR_COOLDOWN_SECONDS,
+      300
+    )
   }
 
   // 节流更新 lastUsedAt
@@ -125,6 +145,9 @@ class OpenAIResponsesRelayService {
         logger.info('🔌 Client disconnected, aborting OpenAI-Responses request')
         if (abortController && !abortController.signal.aborted) {
           abortController.abort()
+        }
+        if (sessionHash && req.body?.stream && req._openaiResponsesFirstByteReceived !== true) {
+          unifiedOpenAIScheduler._deleteSessionMapping(sessionHash).catch(() => {})
         }
         releaseConcurrency().catch((error) => {
           logger.error('Failed to cleanup OpenAI-Responses concurrency on disconnect:', error)
@@ -838,12 +861,15 @@ class OpenAIResponsesRelayService {
 
       // 处理流式响应
       if (req.body?.stream && response.data && typeof response.data.pipe === 'function') {
+        req._openaiResponsesFirstByteReceived = false
         return this._handleStreamResponse(
           response,
           res,
           account,
           apiKeyData,
           req.body?.model,
+          sessionHash,
+          releaseConcurrency,
           handleClientDisconnect,
           handleResponseClose,
           req
@@ -891,7 +917,12 @@ class OpenAIResponsesRelayService {
 
         if (!oaiAutoProtectionDisabled) {
           await upstreamErrorHelper
-            .markTempUnavailable(account.id, 'openai-responses', 503)
+            .markTempUnavailable(
+              account.id,
+              'openai-responses',
+              503,
+              this.transportErrorCooldownSeconds
+            )
             .catch(() => {})
           this._probeTemporaryRecovery(
             fullAccount || account,
@@ -1328,6 +1359,8 @@ class OpenAIResponsesRelayService {
     account,
     apiKeyData,
     requestedModel,
+    sessionHash,
+    releaseConcurrency,
     handleClientDisconnect,
     handleResponseClose,
     req
@@ -1346,6 +1379,84 @@ class OpenAIResponsesRelayService {
     let rateLimitErrorData = null
     let rateLimitIsQuotaExhausted = false
     let streamEnded = false
+    let streamFailureHandled = false
+    let firstByteTimeout = null
+    let idleTimeout = null
+
+    const clearTimeoutGuards = () => {
+      if (firstByteTimeout) {
+        clearTimeout(firstByteTimeout)
+        firstByteTimeout = null
+      }
+      if (idleTimeout) {
+        clearTimeout(idleTimeout)
+        idleTimeout = null
+      }
+    }
+
+    const scheduleIdleTimeout = () => {
+      if (this.streamIdleTimeoutMs <= 0) {
+        return
+      }
+      if (idleTimeout) {
+        clearTimeout(idleTimeout)
+      }
+      idleTimeout = setTimeout(() => {
+        this._handleStreamWatchdogTimeout({
+          response,
+          res,
+          account,
+          apiKeyData,
+          requestedModel,
+          sessionHash,
+          releaseConcurrency,
+          handleClientDisconnect,
+          handleResponseClose,
+          req,
+          reasonLabel: `流式空闲超时 ${this.streamIdleTimeoutMs}ms`,
+          retryReasonLabel: '流式空闲超时',
+          timeoutCode: 'upstream_stream_idle_timeout',
+          timeoutMessage: `Upstream stream idle timeout after ${this.streamIdleTimeoutMs}ms`,
+          firstByteReceived: req._openaiResponsesFirstByteReceived === true,
+          streamFailureHandledRef: () => streamFailureHandled,
+          markStreamFailureHandled: () => {
+            streamFailureHandled = true
+          },
+          clearTimeoutGuards
+        }).catch((error) => {
+          logger.error('Failed to handle OpenAI-Responses stream idle timeout:', error)
+        })
+      }, this.streamIdleTimeoutMs)
+    }
+
+    if (this.streamFirstByteTimeoutMs > 0) {
+      firstByteTimeout = setTimeout(() => {
+        this._handleStreamWatchdogTimeout({
+          response,
+          res,
+          account,
+          apiKeyData,
+          requestedModel,
+          sessionHash,
+          releaseConcurrency,
+          handleClientDisconnect,
+          handleResponseClose,
+          req,
+          reasonLabel: `首包超时 ${this.streamFirstByteTimeoutMs}ms`,
+          retryReasonLabel: '首包超时',
+          timeoutCode: 'upstream_first_byte_timeout',
+          timeoutMessage: `Upstream first byte timeout after ${this.streamFirstByteTimeoutMs}ms`,
+          firstByteReceived: false,
+          streamFailureHandledRef: () => streamFailureHandled,
+          markStreamFailureHandled: () => {
+            streamFailureHandled = true
+          },
+          clearTimeoutGuards
+        }).catch((error) => {
+          logger.error('Failed to handle OpenAI-Responses first-byte timeout:', error)
+        })
+      }, this.streamFirstByteTimeoutMs)
+    }
 
     // 解析 SSE 事件以捕获 usage 数据和 model
     const parseSSEForUsage = (data) => {
@@ -1409,6 +1520,19 @@ class OpenAIResponsesRelayService {
     // 监听数据流
     response.data.on('data', (chunk) => {
       try {
+        if (streamFailureHandled) {
+          return
+        }
+
+        if (req._openaiResponsesFirstByteReceived !== true) {
+          req._openaiResponsesFirstByteReceived = true
+          if (firstByteTimeout) {
+            clearTimeout(firstByteTimeout)
+            firstByteTimeout = null
+          }
+        }
+        scheduleIdleTimeout()
+
         const chunkStr = chunk.toString()
 
         // 转发数据给客户端
@@ -1436,7 +1560,12 @@ class OpenAIResponsesRelayService {
     })
 
     response.data.on('end', async () => {
+      if (streamFailureHandled) {
+        return
+      }
+
       streamEnded = true
+      clearTimeoutGuards()
 
       // 处理剩余的 buffer
       if (buffer.trim()) {
@@ -1567,7 +1696,12 @@ class OpenAIResponsesRelayService {
     })
 
     response.data.on('error', (error) => {
+      if (streamFailureHandled) {
+        return
+      }
+
       streamEnded = true
+      clearTimeoutGuards()
       logger.error('Stream error:', error)
 
       // 清理监听器
@@ -1584,6 +1718,7 @@ class OpenAIResponsesRelayService {
     // 处理客户端断开连接
     const cleanup = () => {
       streamEnded = true
+      clearTimeoutGuards()
       try {
         response.data?.unpipe?.(res)
         response.data?.destroy?.()
@@ -1594,6 +1729,126 @@ class OpenAIResponsesRelayService {
 
     req.on('close', cleanup)
     req.on('aborted', cleanup)
+  }
+
+  async _handleStreamWatchdogTimeout(options) {
+    const {
+      response,
+      res,
+      account,
+      apiKeyData,
+      requestedModel,
+      sessionHash,
+      releaseConcurrency,
+      handleClientDisconnect,
+      handleResponseClose,
+      req,
+      reasonLabel,
+      retryReasonLabel,
+      timeoutCode,
+      timeoutMessage,
+      firstByteReceived,
+      streamFailureHandledRef,
+      markStreamFailureHandled,
+      clearTimeoutGuards
+    } = options
+
+    if (streamFailureHandledRef()) {
+      return
+    }
+    markStreamFailureHandled()
+    clearTimeoutGuards()
+
+    logger.warn(
+      `⏱️ OpenAI-Responses account ${account.id} triggered stream watchdog: ${reasonLabel}`
+    )
+
+    req.removeListener('aborted', handleClientDisconnect)
+    res.removeListener('close', handleResponseClose)
+
+    response.data?.destroy?.(new Error(timeoutMessage))
+
+    const historyContext = {
+      model: requestedModel,
+      path: req.originalUrl,
+      watchdog: reasonLabel
+    }
+
+    await upstreamErrorHelper
+      .markTempUnavailable(account.id, 'openai-responses', 504, null, historyContext)
+      .catch(() => {})
+
+    this._probeTemporaryRecovery(account, requestedModel, reasonLabel).catch((probeError) => {
+      logger.warn(
+        `Failed to probe OpenAI-Responses account availability after ${reasonLabel} for ${account.id}: ${probeError.message}`
+      )
+    })
+
+    if (sessionHash) {
+      await unifiedOpenAIScheduler._deleteSessionMapping(sessionHash).catch(() => {})
+    }
+
+    if (!firstByteReceived) {
+      const retryCount = Number(req._openaiResponses429RetryCount || 0)
+      if (retryCount < 3) {
+        try {
+          req._openaiResponses429RetryCount = retryCount + 1
+          const retried = await this._retryUnavailableRequest(
+            req,
+            res,
+            account,
+            apiKeyData,
+            sessionHash,
+            handleClientDisconnect,
+            handleResponseClose,
+            releaseConcurrency,
+            {
+              reasonLabel: retryReasonLabel,
+              retryCount: req._openaiResponses429RetryCount
+            }
+          )
+          if (retried) {
+            return
+          }
+        } catch (retryError) {
+          logger.warn(
+            `Failed to retry OpenAI-Responses request after ${reasonLabel} for ${account.id}: ${retryError.message}`
+          )
+        }
+      }
+    }
+
+    if (!firstByteReceived && !res.headersSent) {
+      await releaseConcurrency().catch(() => {})
+      return res.status(504).json({
+        error: {
+          message: timeoutMessage,
+          type: 'upstream_timeout',
+          code: timeoutCode
+        }
+      })
+    }
+
+    await releaseConcurrency().catch(() => {})
+
+    if (!res.destroyed) {
+      try {
+        res.write(
+          `data: ${JSON.stringify({
+            error: {
+              message: timeoutMessage,
+              type: 'upstream_timeout',
+              code: timeoutCode
+            }
+          })}\n\n`
+        )
+      } catch (_) {
+        // 忽略写入失败，直接结束连接
+      }
+      if (!res.writableEnded) {
+        res.end()
+      }
+    }
   }
 
   // 处理非流式响应

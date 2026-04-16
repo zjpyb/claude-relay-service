@@ -104,6 +104,16 @@ const config = {
   // ⏱️ 请求超时配置
   requestTimeout: parseInt(process.env.REQUEST_TIMEOUT) || 600000, // 默认 10 分钟
 
+  // 🤖 OpenAI-Responses 保护配置
+  openaiResponses: {
+    streamFirstByteTimeoutMs:
+      parseInt(process.env.OPENAI_RESPONSES_STREAM_FIRST_BYTE_TIMEOUT_MS) || 15000, // 首包超时
+    streamIdleTimeoutMs:
+      parseInt(process.env.OPENAI_RESPONSES_STREAM_IDLE_TIMEOUT_MS) || 45000, // 流式空闲超时
+    transportErrorCooldownSeconds:
+      parseInt(process.env.OPENAI_RESPONSES_TRANSPORT_ERROR_COOLDOWN_SECONDS) || 300 // 传输层异常冷却
+  },
+
   // 📈 使用限制
   limits: {
     defaultTokenLimit: parseInt(process.env.DEFAULT_TOKEN_LIMIT) || 1000000
