@@ -11,6 +11,10 @@ class UnifiedOpenAIScheduler {
     this.SESSION_MAPPING_PREFIX = 'unified_openai_session_mapping:'
   }
 
+  _shouldDeferSessionMapping(accountType) {
+    return accountType === 'openai-responses'
+  }
+
   // 🔧 辅助方法：检查账户是否被限流（兼容字符串和对象格式）
   _isRateLimited(rateLimitStatus) {
     if (!rateLimitStatus) {
@@ -354,8 +358,8 @@ class UnifiedOpenAIScheduler {
       // 选择第一个账户
       const selectedAccount = sortedAccounts[0]
 
-      // 如果有会话哈希，建立新的映射
-      if (sessionHash) {
+      // OpenAI-Responses 的 sticky 绑定延后到 relay 确认首包/正常响应后，避免慢/坏渠道过早粘住
+      if (sessionHash && !this._shouldDeferSessionMapping(selectedAccount.accountType)) {
         await this._setSessionMapping(
           sessionHash,
           selectedAccount.accountId,
@@ -363,6 +367,10 @@ class UnifiedOpenAIScheduler {
         )
         logger.info(
           `🎯 Created new sticky session mapping: ${selectedAccount.name} (${selectedAccount.accountId}, ${selectedAccount.accountType}) for session ${sessionHash}`
+        )
+      } else if (sessionHash && this._shouldDeferSessionMapping(selectedAccount.accountType)) {
+        logger.info(
+          `🕒 Deferring sticky session mapping until relay success: ${selectedAccount.name} (${selectedAccount.accountId}, ${selectedAccount.accountType}) for session ${sessionHash}`
         )
       }
 
@@ -1061,8 +1069,8 @@ class UnifiedOpenAIScheduler {
       // 选择第一个账户
       const selectedAccount = sortedAccounts[0]
 
-      // 如果有会话哈希，建立新的映射
-      if (sessionHash) {
+      // OpenAI-Responses 的 sticky 绑定延后到 relay 确认首包/正常响应后，避免慢/坏渠道过早粘住
+      if (sessionHash && !this._shouldDeferSessionMapping(selectedAccount.accountType)) {
         await this._setSessionMapping(
           sessionHash,
           selectedAccount.accountId,
@@ -1070,6 +1078,10 @@ class UnifiedOpenAIScheduler {
         )
         logger.info(
           `🎯 Created new sticky session mapping from group: ${selectedAccount.name} (${selectedAccount.accountId})`
+        )
+      } else if (sessionHash && this._shouldDeferSessionMapping(selectedAccount.accountType)) {
+        logger.info(
+          `🕒 Deferring sticky session mapping from group until relay success: ${selectedAccount.name} (${selectedAccount.accountId}, ${selectedAccount.accountType}) for session ${sessionHash}`
         )
       }
 

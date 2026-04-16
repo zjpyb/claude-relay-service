@@ -858,6 +858,8 @@ class OpenAIResponsesRelayService {
 
       // 更新最后使用时间（节流）
       await this._throttledUpdateLastUsedAt(account.id)
+      req._openaiResponsesSessionBound = false
+      req._openaiResponsesSessionBinding = false
 
       // 处理流式响应
       if (req.body?.stream && response.data && typeof response.data.pipe === 'function') {
@@ -877,7 +879,22 @@ class OpenAIResponsesRelayService {
       }
 
       // 处理非流式响应
-      return this._handleNormalResponse(response, res, account, apiKeyData, req.body?.model, req)
+      const result = this._handleNormalResponse(
+        response,
+        res,
+        account,
+        apiKeyData,
+        req.body?.model,
+        req
+      )
+      this._bindStickySessionOnSuccess(sessionHash, account, req, 'non-stream response').catch(
+        (bindError) => {
+          logger.warn(
+            `Failed to bind sticky session for OpenAI-Responses account ${account.id} after non-stream response: ${bindError.message}`
+          )
+        }
+      )
+      return result
     } catch (error) {
       // 清理 AbortController
       if (abortController && !abortController.signal.aborted) {
@@ -1530,6 +1547,13 @@ class OpenAIResponsesRelayService {
             clearTimeout(firstByteTimeout)
             firstByteTimeout = null
           }
+          this._bindStickySessionOnSuccess(sessionHash, account, req, 'stream first byte').catch(
+            (bindError) => {
+              logger.warn(
+                `Failed to bind sticky session for OpenAI-Responses account ${account.id} after first byte: ${bindError.message}`
+              )
+            }
+          )
         }
         scheduleIdleTimeout()
 
@@ -1847,6 +1871,37 @@ class OpenAIResponsesRelayService {
       }
       if (!res.writableEnded) {
         res.end()
+      }
+    }
+  }
+
+  async _bindStickySessionOnSuccess(sessionHash, account, req, triggerLabel) {
+    if (!sessionHash || !account?.id) {
+      return
+    }
+
+    if (
+      req?._openaiResponsesSessionBound === true ||
+      req?._openaiResponsesSessionBinding === true
+    ) {
+      return
+    }
+
+    if (req) {
+      req._openaiResponsesSessionBinding = true
+    }
+
+    try {
+      await unifiedOpenAIScheduler._setSessionMapping(sessionHash, account.id, 'openai-responses')
+      if (req) {
+        req._openaiResponsesSessionBound = true
+      }
+      logger.info(
+        `🎯 Bound sticky session after ${triggerLabel}: ${account.name || account.id} (${account.id}, openai-responses) for session ${sessionHash}`
+      )
+    } finally {
+      if (req) {
+        req._openaiResponsesSessionBinding = false
       }
     }
   }
