@@ -339,6 +339,13 @@ const platformFallbackModels = {
   ccr: 'claude-sonnet-4-5-20250929'
 }
 
+const getPreferredModel = (models, preferredModel, fallbackModel) => {
+  const matchedModel = models.find((item) => item?.value === preferredModel)
+  if (matchedModel) return matchedModel.value
+  if (models.length > 0) return models[0].value
+  return preferredModel || fallbackModel
+}
+
 const defaultModel = computed(() => {
   if (props.mode === 'account') {
     const platform = props.account?.platform
@@ -352,13 +359,14 @@ const defaultModel = computed(() => {
       return 'us.anthropic.claude-3-5-haiku-20241022-v1:0'
     }
     const models = availableModels.value
+    if (platform === 'openai-responses') {
+      return platformFallbackModels['openai-responses']
+    }
     if (models.length > 0) return models[0].value
     return platformFallbackModels[platform] || platformFallbackModels.claude
   }
   // apikey 模式: 优先用列表，回退用 serviceConfig 的 defaultModel
-  const models = availableModels.value
-  if (models.length > 0) return models[0].value
-  return apikeyServiceConfig.value.defaultModel
+  return getPreferredModel(availableModels.value, apikeyServiceConfig.value.defaultModel)
 })
 
 // ========== apikey 模式专用 ==========
@@ -591,6 +599,15 @@ watch(
 watch(
   () => [props.account, props.serviceType],
   () => {
+    selectedModel.value = defaultModel.value
+  },
+  { deep: true }
+)
+
+watch(
+  availableModels,
+  () => {
+    if (!props.show || selectedModel.value) return
     selectedModel.value = defaultModel.value
   },
   { deep: true }
