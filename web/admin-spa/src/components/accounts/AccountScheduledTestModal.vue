@@ -536,9 +536,9 @@ function handleClose() {
 
 // 监听 show 变化，加载配置
 watch(
-  () => props.show,
-  async (newVal) => {
-    if (newVal) {
+  () => [props.show, props.account?.id, props.account?.platform],
+  async ([isVisible]) => {
+    if (isVisible && props.account) {
       config.value = createDefaultConfig(props.account)
       testHistory.value = []
       cronPreview.value = {
@@ -546,9 +546,10 @@ watch(
         nextRuns: []
       }
       await loadModels()
-      loadConfig()
+      await loadConfig()
     }
-  }
+  },
+  { immediate: true }
 )
 
 watch(
