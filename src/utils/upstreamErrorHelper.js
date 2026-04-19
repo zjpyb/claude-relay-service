@@ -268,7 +268,7 @@ const getErrorHistory = async (accountType, accountId, offset = 0, limit = 50) =
       .filter((item) => item?.time)
   } catch (error) {
     logger.error(`❌ [ErrorHistory] Failed to get error history for ${accountId}:`, error)
-    return []
+    throw error
   }
 }
 
@@ -281,6 +281,7 @@ const clearErrorHistory = async (accountType, accountId) => {
     await client.del(redisKey)
   } catch (error) {
     logger.error(`❌ [ErrorHistory] Failed to clear error history for ${accountId}:`, error)
+    throw error
   }
 }
 

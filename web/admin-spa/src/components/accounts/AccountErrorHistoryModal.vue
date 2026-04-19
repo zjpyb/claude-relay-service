@@ -50,6 +50,15 @@
             <span class="text-sm text-gray-500 dark:text-gray-400">加载中...</span>
           </div>
 
+          <!-- 加载失败 -->
+          <div
+            v-else-if="errorMessage"
+            class="flex flex-col items-center justify-center rounded-xl border border-red-100 bg-red-50 px-4 py-12 text-center text-red-500 dark:border-red-500/20 dark:bg-red-500/10 dark:text-red-300"
+          >
+            <i class="fas fa-triangle-exclamation mb-3 text-3xl" />
+            <div class="text-sm font-medium">{{ errorMessage }}</div>
+          </div>
+
           <!-- 空状态 -->
           <div
             v-else-if="!list.length"
@@ -61,6 +70,13 @@
 
           <!-- 错误列表 -->
           <div v-else class="space-y-3">
+            <div
+              v-if="loadMoreError"
+              class="rounded-lg border border-amber-100 bg-amber-50 px-3 py-2 text-xs text-amber-700 dark:border-amber-500/20 dark:bg-amber-500/10 dark:text-amber-300"
+            >
+              {{ loadMoreError }}
+            </div>
+
             <div
               v-for="(item, idx) in list"
               :key="idx"
@@ -161,20 +177,47 @@ const loadingMore = ref(false)
 const list = ref([])
 const hasMore = ref(false)
 const expandedIdx = ref(null)
+const errorMessage = ref('')
+const loadMoreError = ref('')
 
 const fetchHistory = async (offset = 0) => {
-  const res = await httpApis.getAccountErrorHistoryApi(props.accountType, props.accountId, {
-    offset,
-    limit: PAGE_SIZE
-  })
-  if (res.success) {
+  try {
+    if (offset === 0) {
+      errorMessage.value = ''
+    } else {
+      loadMoreError.value = ''
+    }
+    const res = await httpApis.getAccountErrorHistoryApi(props.accountType, props.accountId, {
+      offset,
+      limit: PAGE_SIZE
+    })
+    if (!res?.success) {
+      const message = res?.message || '获取错误历史失败'
+      if (offset === 0) {
+        errorMessage.value = message
+        hasMore.value = false
+      } else {
+        loadMoreError.value = message
+      }
+      return
+    }
+
     const data = res.data || []
+    loadMoreError.value = ''
     if (offset === 0) {
       list.value = data
     } else {
       list.value.push(...data)
     }
     hasMore.value = data.length >= PAGE_SIZE
+  } catch (error) {
+    const message = error?.message || '获取错误历史失败'
+    if (offset === 0) {
+      errorMessage.value = message
+      hasMore.value = false
+    } else {
+      loadMoreError.value = message
+    }
   }
 }
 
@@ -183,6 +226,8 @@ watch(
   async (val) => {
     if (val) {
       loading.value = true
+      errorMessage.value = ''
+      loadMoreError.value = ''
       list.value = []
       expandedIdx.value = null
       await fetchHistory(0)
@@ -200,9 +245,19 @@ const loadMore = async () => {
 const handleClose = () => emit('close')
 
 const handleClear = async () => {
-  await httpApis.clearAccountErrorHistoryApi(props.accountType, props.accountId)
-  list.value = []
-  hasMore.value = false
+  try {
+    errorMessage.value = ''
+    loadMoreError.value = ''
+    const res = await httpApis.clearAccountErrorHistoryApi(props.accountType, props.accountId)
+    if (!res?.success) {
+      errorMessage.value = res?.message || '清除错误历史失败'
+      return
+    }
+    list.value = []
+    hasMore.value = false
+  } catch (error) {
+    errorMessage.value = error?.message || '清除错误历史失败'
+  }
 }
 
 const toggleDetail = (idx) => {
