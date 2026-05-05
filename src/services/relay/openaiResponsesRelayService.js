@@ -95,6 +95,10 @@ class OpenAIResponsesRelayService {
     })
   }
 
+  _isAutoProtectionDisabled(account) {
+    return account?.disableAutoProtection === true || account?.disableAutoProtection === 'true'
+  }
+
   // 处理请求转发
   async handleRequest(req, res, account, apiKeyData) {
     let abortController = null
@@ -358,8 +362,7 @@ class OpenAIResponsesRelayService {
           sessionHash
         )
 
-        const oaiAutoProtectionDisabled =
-          account?.disableAutoProtection === true || account?.disableAutoProtection === 'true'
+        const oaiAutoProtectionDisabled = this._isAutoProtectionDisabled(account)
         const historyContext = {
           model: req.body?.model,
           path: req.originalUrl,
@@ -585,8 +588,7 @@ class OpenAIResponsesRelayService {
           )
 
           try {
-            const oaiAutoProtectionDisabled =
-              account?.disableAutoProtection === true || account?.disableAutoProtection === 'true'
+            const oaiAutoProtectionDisabled = this._isAutoProtectionDisabled(account)
             const historyContext = {
               model: req.body?.model,
               path: req.originalUrl,
@@ -662,8 +664,7 @@ class OpenAIResponsesRelayService {
 
           try {
             // 仅临时暂停，不永久禁用
-            const oaiAutoProtectionDisabled =
-              account?.disableAutoProtection === true || account?.disableAutoProtection === 'true'
+            const oaiAutoProtectionDisabled = this._isAutoProtectionDisabled(account)
             if (!oaiAutoProtectionDisabled) {
               await upstreamErrorHelper
                 .markTempUnavailable(account.id, 'openai-responses', 401)
@@ -743,8 +744,7 @@ class OpenAIResponsesRelayService {
           logger.warn(`🚫 OpenAI Responses账号触发403临时暂停 for account ${account.id}`)
 
           try {
-            const oaiAutoProtectionDisabled =
-              account?.disableAutoProtection === true || account?.disableAutoProtection === 'true'
+            const oaiAutoProtectionDisabled = this._isAutoProtectionDisabled(account)
             if (!oaiAutoProtectionDisabled) {
               await upstreamErrorHelper
                 .markTempUnavailable(account.id, 'openai-responses', 403)
@@ -801,8 +801,7 @@ class OpenAIResponsesRelayService {
         // 处理 5xx 上游错误
         if (response.status >= 500 && account?.id && !isUpstreamSchedulerRateLimit) {
           try {
-            const oaiAutoProtectionDisabled =
-              account?.disableAutoProtection === true || account?.disableAutoProtection === 'true'
+            const oaiAutoProtectionDisabled = this._isAutoProtectionDisabled(account)
             if (!oaiAutoProtectionDisabled) {
               await upstreamErrorHelper.markTempUnavailable(
                 account.id,
@@ -951,8 +950,7 @@ class OpenAIResponsesRelayService {
 
       // 检查是否是上游无响应的传输层异常
       if (this._isRetryableTransportError(error) && account?.id) {
-        const oaiAutoProtectionDisabled =
-          account?.disableAutoProtection === true || account?.disableAutoProtection === 'true'
+        const oaiAutoProtectionDisabled = this._isAutoProtectionDisabled(account)
 
         if (!oaiAutoProtectionDisabled) {
           await upstreamErrorHelper
@@ -1053,8 +1051,7 @@ class OpenAIResponsesRelayService {
 
           try {
             // 仅临时暂停，不永久禁用
-            const oaiAutoProtectionDisabled =
-              account?.disableAutoProtection === true || account?.disableAutoProtection === 'true'
+            const oaiAutoProtectionDisabled = this._isAutoProtectionDisabled(account)
             if (!oaiAutoProtectionDisabled) {
               await upstreamErrorHelper
                 .markTempUnavailable(account.id, 'openai-responses', 401)
@@ -1187,8 +1184,7 @@ class OpenAIResponsesRelayService {
           )
 
           try {
-            const oaiAutoProtectionDisabled =
-              account?.disableAutoProtection === true || account?.disableAutoProtection === 'true'
+            const oaiAutoProtectionDisabled = this._isAutoProtectionDisabled(account)
             const historyContext = {
               model: req.body?.model,
               path: req.originalUrl,
@@ -1265,8 +1261,7 @@ class OpenAIResponsesRelayService {
           )
 
           try {
-            const oaiAutoProtectionDisabled =
-              account?.disableAutoProtection === true || account?.disableAutoProtection === 'true'
+            const oaiAutoProtectionDisabled = this._isAutoProtectionDisabled(account)
             if (!oaiAutoProtectionDisabled) {
               await upstreamErrorHelper
                 .markTempUnavailable(account.id, 'openai-responses', 403)
@@ -1322,8 +1317,7 @@ class OpenAIResponsesRelayService {
 
         if (status >= 500 && account?.id && !isUpstreamSchedulerRateLimit) {
           try {
-            const oaiAutoProtectionDisabled =
-              account?.disableAutoProtection === true || account?.disableAutoProtection === 'true'
+            const oaiAutoProtectionDisabled = this._isAutoProtectionDisabled(account)
             if (!oaiAutoProtectionDisabled) {
               await upstreamErrorHelper
                 .markTempUnavailable(account.id, 'openai-responses', status)
@@ -1679,6 +1673,7 @@ class OpenAIResponsesRelayService {
 
       // 如果在流式响应中检测到限流
       if (rateLimitDetected) {
+        const oaiAutoProtectionDisabled = this._isAutoProtectionDisabled(account)
         const sessionId = req.headers['session_id'] || req.body?.session_id
         const sessionHash = sessionId
           ? crypto.createHash('sha256').update(sessionId).digest('hex')
@@ -1691,16 +1686,18 @@ class OpenAIResponsesRelayService {
             sessionHash,
             sourceLabel: '流式响应中明确返回余额耗尽/日限额'
           })
-          this._probeQuotaExhausted429Recovery(account, req.body?.model).catch((probeError) => {
-            logger.warn(
-              `Failed to probe OpenAI-Responses stream account availability after quota-like 429 for ${account.id}: ${probeError.message}`
-            )
-          })
+          if (!oaiAutoProtectionDisabled) {
+            this._probeQuotaExhausted429Recovery(account, req.body?.model).catch((probeError) => {
+              logger.warn(
+                `Failed to probe OpenAI-Responses stream account availability after quota-like 429 for ${account.id}: ${probeError.message}`
+              )
+            })
+          }
 
           logger.warn(
             `🚫 Processing quota-like 429 for OpenAI-Responses account ${account.id} from stream`
           )
-        } else {
+        } else if (!oaiAutoProtectionDisabled) {
           const historyContext = {
             model: req.body?.model,
             path: req.originalUrl,
@@ -1723,6 +1720,10 @@ class OpenAIResponsesRelayService {
 
           logger.warn(
             `🚫 Processing temporary 429 for OpenAI-Responses account ${account.id} from stream`
+          )
+        } else {
+          logger.info(
+            `🛡️ OpenAI-Responses account ${account.id} has auto-protection disabled, skipping temporary pause for stream 429`
           )
         }
       }
@@ -1810,6 +1811,7 @@ class OpenAIResponsesRelayService {
       markStreamFailureHandled,
       clearTimeoutGuards
     } = options
+    const oaiAutoProtectionDisabled = this._isAutoProtectionDisabled(account)
 
     if (streamFailureHandledRef()) {
       return
@@ -1832,15 +1834,21 @@ class OpenAIResponsesRelayService {
       watchdog: reasonLabel
     }
 
-    await upstreamErrorHelper
-      .markTempUnavailable(account.id, 'openai-responses', 504, null, historyContext)
-      .catch(() => {})
+    if (!oaiAutoProtectionDisabled) {
+      await upstreamErrorHelper
+        .markTempUnavailable(account.id, 'openai-responses', 504, null, historyContext)
+        .catch(() => {})
 
-    this._probeTemporaryRecovery(account, requestedModel, reasonLabel).catch((probeError) => {
-      logger.warn(
-        `Failed to probe OpenAI-Responses account availability after ${reasonLabel} for ${account.id}: ${probeError.message}`
+      this._probeTemporaryRecovery(account, requestedModel, reasonLabel).catch((probeError) => {
+        logger.warn(
+          `Failed to probe OpenAI-Responses account availability after ${reasonLabel} for ${account.id}: ${probeError.message}`
+        )
+      })
+    } else {
+      logger.info(
+        `🛡️ OpenAI-Responses account ${account.id} has auto-protection disabled, skipping temporary pause for stream watchdog: ${reasonLabel}`
       )
-    })
+    }
 
     if (sessionHash) {
       await unifiedOpenAIScheduler._deleteSessionMapping(sessionHash).catch(() => {})
@@ -1942,6 +1950,10 @@ class OpenAIResponsesRelayService {
 
   async _maybePauseSlowSuccessfulRequest(account, requestedModel, relayStartedAt, responseLabel) {
     if (!account?.id || !Number.isFinite(relayStartedAt) || this.slowSuccessThresholdMs <= 0) {
+      return
+    }
+
+    if (this._isAutoProtectionDisabled(account)) {
       return
     }
 
@@ -2149,12 +2161,17 @@ class OpenAIResponsesRelayService {
       account.quotaResetTime || '00:00'
     )
 
-    logger.warn(
-      `💸 OpenAI Responses${sourceLabel}，按配置重置时间暂停调度 for account ${account.id}, resetAt=${resetAt}`
-    )
+    const oaiAutoProtectionDisabled = this._isAutoProtectionDisabled(account)
 
-    const oaiAutoProtectionDisabled =
-      account?.disableAutoProtection === true || account?.disableAutoProtection === 'true'
+    if (oaiAutoProtectionDisabled) {
+      logger.info(
+        `🛡️ OpenAI Responses${sourceLabel}，账户已关闭自动防护，仅记录错误历史，不自动暂停调度 for account ${account.id}`
+      )
+    } else {
+      logger.warn(
+        `💸 OpenAI Responses${sourceLabel}，按配置重置时间暂停调度 for account ${account.id}, resetAt=${resetAt}`
+      )
+    }
 
     await upstreamErrorHelper
       .recordErrorHistory(account.id, 'openai-responses', statusCode, 'quota_exceeded', {
