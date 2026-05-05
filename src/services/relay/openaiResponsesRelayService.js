@@ -214,6 +214,45 @@ class OpenAIResponsesRelayService {
             `⚠️ OpenAI-Responses account ${account.name} (${account.id}) concurrency limit exceeded: ${newConcurrency}/${maxConcurrentTasks} (request: ${requestId}, rolled back)`
           )
 
+          if (!res.headersSent && !isClientDisconnected()) {
+            if (sessionHash) {
+              await unifiedOpenAIScheduler._deleteSessionMapping(sessionHash).catch(() => {})
+            }
+
+            const retryCount = Number(req._openaiResponsesConcurrencyRetryCount || 0)
+            if (retryCount < 3) {
+              try {
+                req._openaiResponsesConcurrencyRetryCount = retryCount + 1
+                req._openaiResponsesRetryExcludedAccountIds = Array.from(
+                  new Set([...(req._openaiResponsesRetryExcludedAccountIds || []), account.id])
+                )
+
+                const retried = await this._retryUnavailableRequest(
+                  req,
+                  res,
+                  account,
+                  apiKeyData,
+                  sessionHash,
+                  handleClientDisconnect,
+                  handleResponseClose,
+                  releaseConcurrency,
+                  {
+                    reasonLabel: '账户并发满',
+                    retryCount: req._openaiResponsesConcurrencyRetryCount,
+                    excludedAccountIds: req._openaiResponsesRetryExcludedAccountIds
+                  }
+                )
+                if (retried) {
+                  return res
+                }
+              } catch (retryError) {
+                logger.warn(
+                  `Failed to retry OpenAI-Responses request after account concurrency limit for ${account.id}: ${retryError.message}`
+                )
+              }
+            }
+          }
+
           return res.status(429).json({
             error: {
               message: `Account concurrency limit reached: ${maxConcurrentTasks}`,
@@ -2614,13 +2653,16 @@ class OpenAIResponsesRelayService {
     releaseConcurrency,
     options = {}
   ) {
-    const { reasonLabel = '429', isQuotaExhausted = false, retryCount = 1 } = options
+    const { reasonLabel = '429', retryCount = 1, excludedAccountIds = [] } = options
     const requestedModel = req.body?.model || null
+    const excludedIds = Array.from(
+      new Set([currentAccount.id, ...excludedAccountIds].filter(Boolean))
+    )
     const result = await unifiedOpenAIScheduler.selectAccountForApiKey(
       apiKeyData,
       sessionHash,
       requestedModel,
-      [currentAccount.id]
+      excludedIds
     )
 
     if (!result?.accountId || result.accountType !== 'openai-responses') {
