@@ -12,6 +12,10 @@ const { v4: uuidv4 } = require('uuid')
 const LRUCache = require('../../utils/lruCache')
 const upstreamErrorHelper = require('../../utils/upstreamErrorHelper')
 const { createOpenAITestPayload, extractErrorMessage } = require('../../utils/testPayloadHelper')
+const {
+  createRequestDetailMeta,
+  extractOpenAICacheReadTokens
+} = require('../../utils/requestDetailHelper')
 const DEFAULT_OPENAI_TEST_USER_AGENT =
   'codex-tui/0.118.0 (Mac OS 12.6.9; x86_64) Apple_Terminal (codex-tui; 0.118.0)'
 
@@ -1660,7 +1664,7 @@ class OpenAIResponsesRelayService {
           const outputTokens = usageData.output_tokens || usageData.completion_tokens || 0
 
           // 提取缓存相关的 tokens（如果存在）
-          const cacheReadTokens = usageData.input_tokens_details?.cached_tokens || 0
+          const cacheReadTokens = extractOpenAICacheReadTokens(usageData)
           const cacheCreateTokens = extractCacheCreationTokens(usageData)
           // 计算实际输入token（总输入减去缓存部分）
           const actualInputTokens = Math.max(0, totalInputTokens - cacheReadTokens)
@@ -1679,7 +1683,12 @@ class OpenAIResponsesRelayService {
             modelToRecord,
             account.id,
             'openai-responses',
-            serviceTier
+            serviceTier,
+            createRequestDetailMeta(req, {
+              requestBody: req.body,
+              stream: true,
+              statusCode: res.statusCode
+            })
           )
 
           logger.info(
@@ -2040,7 +2049,7 @@ class OpenAIResponsesRelayService {
         const outputTokens = usageData.output_tokens || usageData.completion_tokens || 0
 
         // 提取缓存相关的 tokens（如果存在）
-        const cacheReadTokens = usageData.input_tokens_details?.cached_tokens || 0
+        const cacheReadTokens = extractOpenAICacheReadTokens(usageData)
         const cacheCreateTokens = extractCacheCreationTokens(usageData)
         // 计算实际输入token（总输入减去缓存部分）
         const actualInputTokens = Math.max(0, totalInputTokens - cacheReadTokens)
@@ -2058,7 +2067,12 @@ class OpenAIResponsesRelayService {
           actualModel,
           account.id,
           'openai-responses',
-          serviceTier
+          serviceTier,
+          createRequestDetailMeta(req, {
+            requestBody: req?.body,
+            stream: false,
+            statusCode: response.status
+          })
         )
 
         logger.info(

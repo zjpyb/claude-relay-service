@@ -773,11 +773,25 @@ class RedisClient {
     const parsed = { ...data }
 
     // 布尔字段
-    const boolFields = ['isActive', 'enableModelRestriction', 'isDeleted']
+    const boolFields = [
+      'isActive',
+      'enableModelRestriction',
+      'enableClientRestriction',
+      'enableOpenAIResponsesCodexAdaptation',
+      'enableOpenAIResponsesPayloadRules',
+      'isDeleted'
+    ]
     for (const field of boolFields) {
       if (parsed[field] !== undefined) {
         parsed[field] = parsed[field] === 'true'
       }
+    }
+
+    if (parsed.enableOpenAIResponsesCodexAdaptation === undefined) {
+      parsed.enableOpenAIResponsesCodexAdaptation = true
+    }
+    if (parsed.enableOpenAIResponsesPayloadRules === undefined) {
+      parsed.enableOpenAIResponsesPayloadRules = false
     }
 
     // 数字字段
@@ -799,7 +813,12 @@ class RedisClient {
     }
 
     // 数组字段（JSON 解析）
-    const arrayFields = ['tags', 'restrictedModels', 'allowedClients']
+    const arrayFields = [
+      'tags',
+      'restrictedModels',
+      'allowedClients',
+      'openaiResponsesPayloadRules'
+    ]
     for (const field of arrayFields) {
       if (parsed[field]) {
         try {
@@ -808,6 +827,10 @@ class RedisClient {
           parsed[field] = []
         }
       }
+    }
+
+    if (!Array.isArray(parsed.openaiResponsesPayloadRules)) {
+      parsed.openaiResponsesPayloadRules = []
     }
 
     // 对象字段（JSON 解析）
@@ -2547,6 +2570,12 @@ class RedisClient {
   async getOAuthSession(sessionId) {
     const key = `oauth:${sessionId}`
     const data = await this.client.hgetall(key)
+
+    // hgetall 在 key 不存在或已过期时返回空对象 {}，调用方的 if (!session) 检查无法识别
+    // 这里显式返回 null，避免过期会话绕过检查后在后续逻辑中崩溃
+    if (!data || Object.keys(data).length === 0) {
+      return null
+    }
 
     // 反序列化 proxy 字段
     if (data.proxy) {
