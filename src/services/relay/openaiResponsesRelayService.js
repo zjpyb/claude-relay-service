@@ -1722,10 +1722,6 @@ class OpenAIResponsesRelayService {
       // 如果在流式响应中检测到限流
       if (rateLimitDetected) {
         const oaiAutoProtectionDisabled = this._isAutoProtectionDisabled(account)
-        const sessionId = req.headers['session_id'] || req.body?.session_id
-        const sessionHash = sessionId
-          ? crypto.createHash('sha256').update(sessionId).digest('hex')
-          : null
 
         if (rateLimitIsQuotaExhausted) {
           await this._markQuotaExceededUntilReset(account, 429, rateLimitErrorData, {
@@ -2839,7 +2835,7 @@ class OpenAIResponsesRelayService {
   }
 
   // 处理 429 限流错误
-  async _handle429Error(account, response, isStream = false, sessionHash = null) {
+  async _handle429Error(account, response, isStream = false, _sessionHash = null) {
     let resetsInSeconds = null
     let errorData = null
     let cooldownReason = 'default'
@@ -2899,9 +2895,10 @@ class OpenAIResponsesRelayService {
         errorData = response.data
       }
 
-      const resolvedCooldown = this._resolve429ResetSeconds(errorData, response.headers)
-      resetsInSeconds = resolvedCooldown.resetsInSeconds
-      cooldownReason = resolvedCooldown.cooldownReason
+      const { resetsInSeconds: resolvedResetSeconds, cooldownReason: resolvedCooldownReason } =
+        this._resolve429ResetSeconds(errorData, response.headers)
+      resetsInSeconds = resolvedResetSeconds
+      cooldownReason = resolvedCooldownReason
 
       if (resetsInSeconds) {
         logger.info(

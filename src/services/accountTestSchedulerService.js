@@ -8,10 +8,9 @@ const path = require('path')
 const redis = require('../models/redis')
 const logger = require('../utils/logger')
 
-const { TimeMatcher } = require(path.join(
-  path.dirname(require.resolve('node-cron')),
-  'time/time-matcher.js'
-))
+const { TimeMatcher } = require(
+  path.join(path.dirname(require.resolve('node-cron')), 'time/time-matcher.js')
+)
 
 class AccountTestSchedulerService {
   constructor() {
