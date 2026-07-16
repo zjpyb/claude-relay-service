@@ -509,6 +509,11 @@ class PricingService {
     return modelName.replace(/\[1m\]/gi, '').trim()
   }
 
+  normalizeNonNegativeInteger(value) {
+    const parsed = Number(value)
+    return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : 0
+  }
+
   // 计算使用费用
   calculateCost(usage, modelName) {
     const normalizedModelName = this.stripLongContextSuffix(modelName)
@@ -520,6 +525,15 @@ class PricingService {
 
     // 计算总输入 tokens（用于判断是否超过 200K 阈值）
     const inputTokens = usage.input_tokens || 0
+    const imageInputTokens = Math.min(
+      inputTokens,
+      this.normalizeNonNegativeInteger(usage.input_tokens_details?.image_tokens)
+    )
+    const outputTokens = usage.output_tokens || 0
+    const imageOutputTokens = Math.min(
+      outputTokens,
+      this.normalizeNonNegativeInteger(usage.output_tokens_details?.image_tokens)
+    )
     const cacheCreationTokens = usage.cache_creation_input_tokens || 0
     const cacheReadTokens = usage.cache_read_input_tokens || 0
     const totalInputTokens = inputTokens + cacheCreationTokens + cacheReadTokens
@@ -616,6 +630,8 @@ class PricingService {
         ? pricing.output_cost_per_token_above_200k_tokens
         : baseOutputPrice
       : baseOutputPrice
+    let actualImageInputPrice = pricing.input_cost_per_image_token || actualInputPrice
+    let actualImageOutputPrice = pricing.output_cost_per_image_token || actualOutputPrice
 
     // 缓存价格：优先从 model_pricing.json 取，Claude 缺失时用倍率兜底
     let actualCacheCreatePrice = 0
@@ -669,11 +685,16 @@ class PricingService {
       actualCacheCreatePrice *= fastMultiplier
       actualCacheReadPrice *= fastMultiplier
       actualEphemeral1hPrice *= fastMultiplier
+      actualImageInputPrice *= fastMultiplier
+      actualImageOutputPrice *= fastMultiplier
     }
 
     // 计算各项费用
-    const inputCost = inputTokens * actualInputPrice
-    const outputCost = (usage.output_tokens || 0) * actualOutputPrice
+    const inputCost =
+      (inputTokens - imageInputTokens) * actualInputPrice + imageInputTokens * actualImageInputPrice
+    const outputCost =
+      (outputTokens - imageOutputTokens) * actualOutputPrice +
+      imageOutputTokens * actualImageOutputPrice
 
     // 处理缓存费用
     let ephemeral5mCost = 0
@@ -716,6 +737,8 @@ class PricingService {
       pricing: {
         input: actualInputPrice,
         output: actualOutputPrice,
+        imageInput: actualImageInputPrice,
+        imageOutput: actualImageOutputPrice,
         cacheCreate: actualCacheCreatePrice,
         cacheRead: actualCacheReadPrice,
         ephemeral1h: actualEphemeral1hPrice

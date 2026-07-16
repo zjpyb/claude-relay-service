@@ -1665,7 +1665,8 @@ class ApiKeyService {
     accountId = null,
     accountType = null,
     serviceTier = null,
-    requestMeta = null
+    requestMeta = null,
+    usageDetails = null
   ) {
     try {
       const finalizedRequestMeta = finalizeRequestDetailMeta(requestMeta)
@@ -1673,16 +1674,23 @@ class ApiKeyService {
 
       // 计算费用
       const CostCalculator = require('../utils/costCalculator')
-      const costInfo = CostCalculator.calculateCost(
-        {
-          input_tokens: inputTokens,
-          output_tokens: outputTokens,
-          cache_creation_input_tokens: cacheCreateTokens,
-          cache_read_input_tokens: cacheReadTokens
-        },
-        model,
-        serviceTier
-      )
+      const costUsage = {
+        input_tokens: inputTokens,
+        output_tokens: outputTokens,
+        cache_creation_input_tokens: cacheCreateTokens,
+        cache_read_input_tokens: cacheReadTokens
+      }
+      if (usageDetails?.input_tokens_details) {
+        costUsage.input_tokens_details = usageDetails.input_tokens_details
+      } else if (usageDetails?.prompt_tokens_details) {
+        costUsage.input_tokens_details = usageDetails.prompt_tokens_details
+      }
+      if (usageDetails?.output_tokens_details) {
+        costUsage.output_tokens_details = usageDetails.output_tokens_details
+      } else if (usageDetails?.completion_tokens_details) {
+        costUsage.output_tokens_details = usageDetails.completion_tokens_details
+      }
+      const costInfo = CostCalculator.calculateCost(costUsage, model, serviceTier)
 
       // 检查是否为 1M 上下文请求
       let isLongContextRequest = false

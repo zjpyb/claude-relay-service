@@ -71,6 +71,35 @@ describe('CostCalculator', () => {
     expect(logger.warn).not.toHaveBeenCalled()
   })
 
+  it('uses detailed pricing for image token usage', () => {
+    pricingService.calculateCost.mockReturnValue({
+      hasPricing: true,
+      isLongContextRequest: false,
+      inputCost: 0.00074,
+      outputCost: 0.005,
+      cacheCreateCost: 0,
+      cacheReadCost: 0,
+      totalCost: 0.00574,
+      pricing: {
+        input: 0.000005,
+        output: 0.00001,
+        cacheCreate: 0,
+        cacheRead: 0
+      }
+    })
+
+    const usage = {
+      input_tokens: 100,
+      output_tokens: 200,
+      input_tokens_details: { image_tokens: 80 },
+      output_tokens_details: { image_tokens: 150 }
+    }
+    const result = CostCalculator.calculateCost(usage, 'gpt-image-2')
+
+    expect(pricingService.calculateCost).toHaveBeenCalledWith(usage, 'gpt-image-2')
+    expect(result.costs.total).toBeCloseTo(0.00574, 12)
+  })
+
   it('falls back to unknown pricing for detailed-cache requests with missing model pricing', () => {
     pricingService.calculateCost.mockReturnValue({
       hasPricing: false,

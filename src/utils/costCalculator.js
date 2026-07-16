@@ -82,6 +82,8 @@ class CostCalculator {
   static isDetailedPricingRequest(usage, model = 'unknown') {
     return (
       (usage.cache_creation && typeof usage.cache_creation === 'object') ||
+      (usage.input_tokens_details && typeof usage.input_tokens_details === 'object') ||
+      (usage.output_tokens_details && typeof usage.output_tokens_details === 'object') ||
       (typeof model === 'string' && model.includes('[1m]'))
     )
   }

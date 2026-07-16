@@ -6,7 +6,6 @@ const config = require('../../config/config')
 const { authenticateApiKey } = require('../middleware/auth')
 const unifiedOpenAIScheduler = require('../services/scheduler/unifiedOpenAIScheduler')
 const openaiAccountService = require('../services/account/openaiAccountService')
-const openaiResponsesAccountService = require('../services/account/openaiResponsesAccountService')
 const openaiResponsesRelayService = require('../services/relay/openaiResponsesRelayService')
 const apiKeyService = require('../services/apiKeyService')
 const redis = require('../models/redis')
@@ -20,6 +19,7 @@ const {
   extractOpenAICacheReadTokens
 } = require('../utils/requestDetailHelper')
 const requestBodyRuleService = require('../services/requestBodyRuleService')
+const { getOpenAIAuthToken } = require('../services/openaiAuthService')
 
 // Codex CLI 系统提示词（非 Codex CLI 客户端请求时注入，统一端点也使用）
 const CODEX_CLI_INSTRUCTIONS =
@@ -171,121 +171,6 @@ async function applyRateLimitTracking(
     }
   } catch (error) {
     logger.error(`❌ Failed to update rate limit counters${label}:`, error)
-  }
-}
-
-// 使用统一调度器选择 OpenAI 账户
-async function getOpenAIAuthToken(apiKeyData, sessionId = null, requestedModel = null) {
-  try {
-    // 生成会话哈希（如果有会话ID）
-    const sessionHash = sessionId
-      ? crypto.createHash('sha256').update(sessionId).digest('hex')
-      : null
-
-    // 使用统一调度器选择账户
-    const result = await unifiedOpenAIScheduler.selectAccountForApiKey(
-      apiKeyData,
-      sessionHash,
-      requestedModel
-    )
-
-    if (!result || !result.accountId) {
-      const error = new Error('No available OpenAI account found')
-      error.statusCode = 402 // Payment Required - 资源耗尽
-      throw error
-    }
-
-    // 根据账户类型获取账户详情
-    let account,
-      accessToken,
-      proxy = null
-
-    if (result.accountType === 'openai-responses') {
-      // 处理 OpenAI-Responses 账户
-      account = await openaiResponsesAccountService.getAccount(result.accountId)
-      if (!account || !account.apiKey) {
-        const error = new Error(`OpenAI-Responses account ${result.accountId} has no valid apiKey`)
-        error.statusCode = 403 // Forbidden - 账户配置错误
-        throw error
-      }
-
-      // OpenAI-Responses 账户不需要 accessToken，直接返回账户信息
-      accessToken = null // OpenAI-Responses 使用账户内的 apiKey
-
-      // 解析代理配置
-      if (account.proxy) {
-        try {
-          proxy = typeof account.proxy === 'string' ? JSON.parse(account.proxy) : account.proxy
-        } catch (e) {
-          logger.warn('Failed to parse proxy configuration:', e)
-        }
-      }
-
-      logger.info(`Selected OpenAI-Responses account: ${account.name} (${result.accountId})`)
-    } else {
-      // 处理普通 OpenAI 账户
-      account = await openaiAccountService.getAccount(result.accountId)
-      if (!account || !account.accessToken) {
-        const error = new Error(`OpenAI account ${result.accountId} has no valid accessToken`)
-        error.statusCode = 403 // Forbidden - 账户配置错误
-        throw error
-      }
-
-      // 检查 token 是否过期并自动刷新（双重保护）
-      if (openaiAccountService.isTokenExpired(account)) {
-        if (account.refreshToken) {
-          logger.info(`🔄 Token expired, auto-refreshing for account ${account.name} (fallback)`)
-          try {
-            await openaiAccountService.refreshAccountToken(result.accountId)
-            // 重新获取更新后的账户
-            account = await openaiAccountService.getAccount(result.accountId)
-            logger.info(`✅ Token refreshed successfully in route handler`)
-          } catch (refreshError) {
-            logger.error(`Failed to refresh token for ${account.name}:`, refreshError)
-            const error = new Error(`Token expired and refresh failed: ${refreshError.message}`)
-            error.statusCode = 403 // Forbidden - 认证失败
-            throw error
-          }
-        } else {
-          const error = new Error(
-            `Token expired and no refresh token available for account ${account.name}`
-          )
-          error.statusCode = 403 // Forbidden - 认证失败
-          throw error
-        }
-      }
-
-      // 解密 accessToken（account.accessToken 是加密的）
-      accessToken = openaiAccountService.decrypt(account.accessToken)
-      if (!accessToken) {
-        const error = new Error('Failed to decrypt OpenAI accessToken')
-        error.statusCode = 403 // Forbidden - 配置/权限错误
-        throw error
-      }
-
-      // 解析代理配置
-      if (account.proxy) {
-        try {
-          proxy = typeof account.proxy === 'string' ? JSON.parse(account.proxy) : account.proxy
-        } catch (e) {
-          logger.warn('Failed to parse proxy configuration:', e)
-        }
-      }
-
-      logger.info(`Selected OpenAI account: ${account.name} (${result.accountId})`)
-    }
-
-    return {
-      accessToken,
-      accountId: result.accountId,
-      accountName: account.name,
-      accountType: result.accountType,
-      proxy,
-      account
-    }
-  } catch (error) {
-    logger.error('Failed to get OpenAI auth token:', error)
-    throw error
   }
 }
 

@@ -78,6 +78,24 @@ describe('PricingService - Long Context Pricing', () => {
     jest.clearAllMocks()
   })
 
+  describe('OpenAI 图片 token 计费', () => {
+    it('分别使用文本和图片 token 单价', () => {
+      const result = pricingService.calculateCost(
+        {
+          input_tokens: 100,
+          output_tokens: 200,
+          input_tokens_details: { image_tokens: 80 },
+          output_tokens_details: { image_tokens: 150 }
+        },
+        'gpt-image-2'
+      )
+
+      expect(result.inputCost).toBeCloseTo(20 * 5e-6 + 80 * 8e-6, 12)
+      expect(result.outputCost).toBeCloseTo(50 * 1e-5 + 150 * 3e-5, 12)
+      expect(result.totalCost).toBeCloseTo(0.00574, 12)
+    })
+  })
+
   describe('Claude 模型平坦计费（无 200K+ 加价）', () => {
     it('199999 tokens - 应使用基础价格', () => {
       const usage = {
